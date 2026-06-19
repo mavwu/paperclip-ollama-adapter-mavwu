@@ -37,6 +37,7 @@ Use this adapter to run Paperclip agents through Ollama's OpenAI-compatible chat
 - SYSTEM_PROMPT: Optional system prompt prepended to each request.
 - AUTO_MARK_DONE: When true, successful runs call Paperclip and mark the touched issue done. Defaults to true.
 - PAPERCLIP_BASE_URL: Paperclip server URL for AUTO_MARK_DONE. Defaults to http://127.0.0.1:3100
+- ENABLE_PAPERCLIP_ACTIONS: When true, the adapter can inspect visible agents and create assigned follow-up tasks when asked. Defaults to true.
 
 ## Paperclip adapter config
 
@@ -50,4 +51,5 @@ The same values can be provided through adapter config using either uppercase ke
 - SYSTEM_PROMPT or systemPrompt
 - AUTO_MARK_DONE or autoMarkDone
 - PAPERCLIP_BASE_URL or paperclipBaseUrl
+- ENABLE_PAPERCLIP_ACTIONS or enablePaperclipActions
 `;

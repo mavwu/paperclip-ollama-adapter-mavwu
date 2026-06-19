@@ -10,6 +10,29 @@ import { readOllamaConfig } from "./config.js";
 
 type JsonObject = Record<string, unknown>;
 
+interface PaperclipAgentSummary {
+  id: string;
+  name: string;
+  role?: string | null;
+  title?: string | null;
+  status?: string | null;
+  reportsTo?: string | null;
+}
+
+interface DelegationDecision {
+  shouldDelegate: boolean;
+  assigneeName?: string | null;
+  title?: string | null;
+  description?: string | null;
+  reason?: string | null;
+}
+
+interface PaperclipActionContext {
+  agents: PaperclipAgentSummary[];
+  promptAddon: string | null;
+  actions: JsonObject[];
+}
+
 function isRecord(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -309,6 +332,369 @@ function readIssueId(context: AdapterExecutionContext): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function readCompanyId(context: AdapterExecutionContext): string | null {
+  const value =
+    readPath(context, ["agent", "companyId"]) ??
+    readPath(context, ["context", "paperclipIssue", "companyId"]) ??
+    readPath(context, ["context", "companyId"]);
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function paperclipHeaders(context: AdapterExecutionContext): Record<string, string> | null {
+  if (!context.authToken) {
+    return null;
+  }
+
+  return {
+    Authorization: `Bearer ${context.authToken}`,
+    "Content-Type": "application/json",
+  };
+}
+
+export function wantsCompanyContext(prompt: string): boolean {
+  return /\b(agent|agents|org chart|organization|organisation|company|coworker|team|reports to)\b/i.test(prompt);
+}
+
+export function wantsDelegation(prompt: string): boolean {
+  return /\b(assign|delegate|forward|handoff|hand off|send (?:it|this|that)?\s*to|ask .+ to|tell .+ to|create (?:a )?(?:task|sub[- ]?task|follow[- ]?up))\b/i.test(prompt);
+}
+
+function actionIntentText(prompt: string): string {
+  const currentRequest = prompt.match(/# Current user request\s+([\s\S]*?)(?:\n\n# Existing task context|\n\n---|$)/i);
+  if (currentRequest?.[1]?.trim()) {
+    return currentRequest[1].trim();
+  }
+
+  return prompt
+    .replace(/# Agent identity[\s\S]*?Answer as this Paperclip agent for company\/task interactions\.\s*/i, "")
+    .trim();
+}
+
+function normalizeAgent(value: unknown): PaperclipAgentSummary | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = textFromValue(value.id);
+  const name = textFromValue(value.name);
+  if (!id || !name) {
+    return null;
+  }
+
+  return {
+    id,
+    name,
+    role: textFromValue(value.role),
+    title: textFromValue(value.title),
+    status: textFromValue(value.status),
+    reportsTo: textFromValue(value.reportsTo),
+  };
+}
+
+async function fetchPaperclipAgents(
+  context: AdapterExecutionContext,
+  paperclipBaseUrl: string,
+): Promise<{ ok: true; agents: PaperclipAgentSummary[] } | { ok: false; error: string }> {
+  const companyId = readCompanyId(context);
+  const headers = paperclipHeaders(context);
+  if (!companyId) {
+    return { ok: false, error: "missing_company_id" };
+  }
+
+  if (!headers) {
+    return { ok: false, error: "missing_auth_token" };
+  }
+
+  try {
+    const response = await axios.get(`${paperclipBaseUrl}/api/companies/${encodeURIComponent(companyId)}/agents`, {
+      headers,
+    });
+    const agents = Array.isArray(response.data)
+      ? response.data.map(normalizeAgent).filter((agent): agent is PaperclipAgentSummary => Boolean(agent))
+      : [];
+    return { ok: true, agents };
+  } catch (error) {
+    const axiosError = error as AxiosError<{ error?: string; message?: string }>;
+    return {
+      ok: false,
+      error:
+        axiosError.response?.data?.error ??
+        axiosError.response?.data?.message ??
+        axiosError.message,
+    };
+  }
+}
+
+function describeAgents(agents: PaperclipAgentSummary[]): string {
+  if (agents.length === 0) {
+    return "No visible agents.";
+  }
+
+  return agents
+    .map((agent) =>
+      [
+        `- ${agent.name}`,
+        agent.title ? `title: ${agent.title}` : null,
+        agent.role ? `role: ${agent.role}` : null,
+        agent.status ? `status: ${agent.status}` : null,
+      ]
+        .filter(Boolean)
+        .join(" | "),
+    )
+    .join("\n");
+}
+
+function buildCompanyContextPrompt(agents: PaperclipAgentSummary[]): string {
+  return [
+    "# Available Paperclip agents",
+    describeAgents(agents),
+    "",
+    "Use this company context when the request asks about agents, the org chart, assignment, delegation, or forwarding work.",
+    "If you create or claim a task handoff, rely on the adapter action result instead of inventing Paperclip state.",
+  ].join("\n");
+}
+
+function extractJsonObject(text: string): JsonObject | null {
+  const trimmed = text.trim();
+  const candidates = [
+    trimmed,
+    trimmed.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, ""),
+    trimmed.slice(trimmed.indexOf("{"), trimmed.lastIndexOf("}") + 1),
+  ];
+
+  for (const candidate of candidates) {
+    if (!candidate.trim()) {
+      continue;
+    }
+
+    try {
+      const parsed = JSON.parse(candidate);
+      return isRecord(parsed) ? parsed : null;
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  return null;
+}
+
+async function planDelegation(
+  config: ReturnType<typeof readOllamaConfig>,
+  prompt: string,
+  agents: PaperclipAgentSummary[],
+): Promise<DelegationDecision | null> {
+  const response = await axios.post(
+    `${config.baseUrl}/chat/completions`,
+    {
+      model: config.model,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Return only compact JSON. Decide whether this Paperclip request should create an assigned follow-up task for another visible agent.",
+        },
+        {
+          role: "user",
+          content: [
+            "Current request:",
+            prompt,
+            "",
+            "Visible agents:",
+            describeAgents(agents),
+            "",
+            'Return JSON with keys: shouldDelegate boolean, assigneeName string|null, title string|null, description string|null, reason string|null.',
+          ].join("\n"),
+        },
+      ],
+      temperature: 0,
+      max_tokens: 512,
+      stream: false,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        "Content-Type": "application/json",
+      },
+    },
+  );
+
+  const parsed = extractJsonObject(extractText(response.data));
+  if (!parsed) {
+    return null;
+  }
+
+  return {
+    shouldDelegate: parsed.shouldDelegate === true,
+    assigneeName: textFromValue(parsed.assigneeName),
+    title: textFromValue(parsed.title),
+    description: textFromValue(parsed.description),
+    reason: textFromValue(parsed.reason),
+  };
+}
+
+function findAgentByName(agents: PaperclipAgentSummary[], name: string | null | undefined): PaperclipAgentSummary | null {
+  if (!name) {
+    return null;
+  }
+
+  const normalized = name.trim().toLowerCase();
+  const agentMatches = (agent: PaperclipAgentSummary): boolean => {
+    const fields = [agent.name, agent.title, agent.role].filter((field): field is string => Boolean(field));
+    return fields.some((field) => {
+      const value = field.toLowerCase();
+      return value === normalized || value.includes(normalized) || normalized.includes(value);
+    });
+  };
+
+  return (
+    agents.find((agent) => agent.name.toLowerCase() === normalized) ??
+    agents.find(agentMatches) ??
+    null
+  );
+}
+
+async function preparePaperclipActionContext(
+  context: AdapterExecutionContext,
+  config: ReturnType<typeof readOllamaConfig>,
+  prompt: string,
+): Promise<PaperclipActionContext> {
+  const intentText = actionIntentText(prompt);
+  if (!config.enablePaperclipActions || (!wantsCompanyContext(intentText) && !wantsDelegation(intentText))) {
+    return { agents: [], promptAddon: null, actions: [] };
+  }
+
+  const agentsResult = await fetchPaperclipAgents(context, config.paperclipBaseUrl);
+  if (!agentsResult.ok) {
+    return {
+      agents: [],
+      promptAddon: [
+        "# Paperclip company context",
+        `The adapter tried to inspect visible agents but could not: ${agentsResult.error}.`,
+      ].join("\n\n"),
+      actions: [{ type: "fetch_agents", success: false, error: agentsResult.error }],
+    };
+  }
+
+  return {
+    agents: agentsResult.agents,
+    promptAddon: buildCompanyContextPrompt(agentsResult.agents),
+    actions: [{ type: "fetch_agents", success: true, count: agentsResult.agents.length }],
+  };
+}
+
+async function maybeCreateDelegatedIssue(
+  context: AdapterExecutionContext,
+  config: ReturnType<typeof readOllamaConfig>,
+  prompt: string,
+  agents: PaperclipAgentSummary[],
+): Promise<{ text: string; action: JsonObject } | null> {
+  if (!config.enablePaperclipActions || !wantsDelegation(actionIntentText(prompt)) || agents.length === 0) {
+    return null;
+  }
+
+  let decision: DelegationDecision | null = null;
+  try {
+    decision = await planDelegation(config, prompt, agents);
+  } catch (error) {
+    return {
+      text: "I could not create the delegated task because the delegation planner failed.",
+      action: {
+        type: "delegate_issue",
+        attempted: false,
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    };
+  }
+
+  if (!decision?.shouldDelegate) {
+    return null;
+  }
+
+  const assignee = findAgentByName(agents, decision.assigneeName);
+  if (!assignee) {
+    return {
+      text: `I could not create the delegated task because I could not match "${decision.assigneeName ?? "the requested agent"}" to a visible Paperclip agent.`,
+      action: {
+        type: "delegate_issue",
+        attempted: false,
+        success: false,
+        reason: "assignee_not_found",
+        requestedAssignee: decision.assigneeName ?? null,
+      },
+    };
+  }
+
+  const action = await createDelegatedIssue(context, config.paperclipBaseUrl, assignee, decision);
+  if (action.success === true) {
+    const identifier = typeof action.identifier === "string" ? ` (${action.identifier})` : "";
+    const title = decision.title ? `: ${decision.title}` : "";
+    return {
+      text: `Created a follow-up task for ${assignee.name}${identifier}${title}.`,
+      action: { type: "delegate_issue", ...action },
+    };
+  }
+
+  return {
+    text: `I tried to create a follow-up task for ${assignee.name}, but Paperclip rejected it: ${String(action.error ?? action.reason ?? "unknown error")}.`,
+    action: { type: "delegate_issue", ...action },
+  };
+}
+
+async function createDelegatedIssue(
+  context: AdapterExecutionContext,
+  paperclipBaseUrl: string,
+  assignee: PaperclipAgentSummary,
+  decision: DelegationDecision,
+): Promise<JsonObject> {
+  const companyId = readCompanyId(context);
+  const headers = paperclipHeaders(context);
+  const parentId = readIssueId(context);
+  if (!companyId) {
+    return { attempted: false, reason: "missing_company_id" };
+  }
+
+  if (!headers) {
+    return { attempted: false, reason: "missing_auth_token" };
+  }
+
+  try {
+    const response = await axios.post(
+      `${paperclipBaseUrl}/api/companies/${encodeURIComponent(companyId)}/issues`,
+      {
+        title: decision.title ?? `Follow up: ${assignee.name}`,
+        description: decision.description ?? decision.reason ?? "Follow-up task delegated by the current Paperclip agent.",
+        status: "todo",
+        parentId,
+        assigneeAgentId: assignee.id,
+      },
+      { headers },
+    );
+
+    return {
+      attempted: true,
+      success: true,
+      issueId: isRecord(response.data) ? response.data.id ?? null : null,
+      identifier: isRecord(response.data) ? response.data.identifier ?? null : null,
+      assigneeAgentId: assignee.id,
+      assigneeName: assignee.name,
+    };
+  } catch (error) {
+    const axiosError = error as AxiosError<{ error?: string; message?: string }>;
+    return {
+      attempted: true,
+      success: false,
+      status: axiosError.response?.status ?? null,
+      assigneeAgentId: assignee.id,
+      assigneeName: assignee.name,
+      error:
+        axiosError.response?.data?.error ??
+        axiosError.response?.data?.message ??
+        axiosError.message,
+    };
+  }
+}
+
 async function markIssueDone(context: AdapterExecutionContext, paperclipBaseUrl: string, comment: string): Promise<JsonObject> {
   const issueId = readIssueId(context);
   if (!issueId) {
@@ -353,7 +739,80 @@ async function markIssueDone(context: AdapterExecutionContext, paperclipBaseUrl:
 export async function execute(context: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const options = readOptions(context);
   const config = readOllamaConfig({ ...context.config, ...options });
-  const prompt = extractPrompt(context);
+  let prompt = extractPrompt(context);
+  const paperclipActions = await preparePaperclipActionContext(context, config, prompt);
+  if (paperclipActions.promptAddon) {
+    prompt = [prompt, "---", paperclipActions.promptAddon].join("\n\n");
+  }
+
+  const delegatedIssue = await maybeCreateDelegatedIssue(context, config, prompt, paperclipActions.agents);
+  if (delegatedIssue) {
+    const autoDisposition = config.autoMarkDone
+      ? await markIssueDone(context, config.paperclipBaseUrl, delegatedIssue.text)
+      : { attempted: false, reason: "disabled" };
+    const actions = [...paperclipActions.actions, delegatedIssue.action];
+
+    await context.onMeta?.({
+      adapterType: type,
+      command: "paperclip-delegate-issue",
+      env: {
+        BASE_URL: config.baseUrl,
+        MODEL: config.model,
+        PAPERCLIP_BASE_URL: config.paperclipBaseUrl,
+      },
+      prompt,
+      context: { provider: "ollama", model: config.model, actions },
+    });
+
+    await context.onLog(
+      "stdout",
+      `[paperclip-ollama-adapter] actions ${JSON.stringify({
+        enablePaperclipActions: config.enablePaperclipActions,
+        paperclipBaseUrl: config.paperclipBaseUrl,
+        actions,
+      })}`,
+    );
+    await context.onLog(
+      "stdout",
+      `[paperclip-ollama-adapter] disposition ${JSON.stringify({
+        autoMarkDone: config.autoMarkDone,
+        paperclipBaseUrl: config.paperclipBaseUrl,
+        ...autoDisposition,
+      })}`,
+    );
+    await context.onLog("stdout", delegatedIssue.text);
+
+    return {
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      provider: "ollama",
+      biller: "ollama",
+      model: config.model,
+      billingType: "fixed",
+      costUsd: 0,
+      summary: delegatedIssue.text,
+      resultJson: {
+        success: true,
+        stopReason: "completed",
+        summary: delegatedIssue.text,
+        result: delegatedIssue.text,
+        message: delegatedIssue.text,
+        output: delegatedIssue.text,
+        text: delegatedIssue.text,
+        adapter: label,
+        adapterType: type,
+        model: config.model,
+        disposition: autoDisposition,
+        actions,
+        usage: null,
+      },
+      sessionId: context.runtime?.sessionId ?? null,
+      sessionParams: context.runtime?.sessionParams ?? null,
+      sessionDisplayId: context.runtime?.sessionDisplayId ?? null,
+    };
+  }
+
   const messages = [
     ...(config.systemPrompt ? [{ role: "system", content: config.systemPrompt }] : []),
     { role: "user", content: prompt },
@@ -403,6 +862,16 @@ export async function execute(context: AdapterExecutionContext): Promise<Adapter
         ...autoDisposition,
       })}`,
     );
+    if (paperclipActions.actions.length > 0) {
+      await context.onLog(
+        "stdout",
+        `[paperclip-ollama-adapter] actions ${JSON.stringify({
+          enablePaperclipActions: config.enablePaperclipActions,
+          paperclipBaseUrl: config.paperclipBaseUrl,
+          actions: paperclipActions.actions,
+        })}`,
+      );
+    }
 
     await context.onLog("stdout", text);
 
@@ -429,6 +898,7 @@ export async function execute(context: AdapterExecutionContext): Promise<Adapter
         adapterType: type,
         model: config.model,
         disposition: autoDisposition,
+        actions: paperclipActions.actions,
         usage: extractUsage(response.data) ?? null,
       },
       sessionId: context.runtime?.sessionId ?? null,

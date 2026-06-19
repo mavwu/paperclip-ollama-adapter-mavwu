@@ -56,6 +56,13 @@ function getConfigSchema(): AdapterConfigSchema {
         hint: "When enabled, successful one-shot runs mark the touched Paperclip issue done.",
       },
       {
+        key: "ENABLE_PAPERCLIP_ACTIONS",
+        label: "Paperclip Actions",
+        type: "toggle",
+        default: true,
+        hint: "Allow the adapter to inspect agents and create assigned follow-up tasks when asked.",
+      },
+      {
         key: "PAPERCLIP_BASE_URL",
         label: "Paperclip Base URL",
         type: "text",

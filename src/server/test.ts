@@ -8,7 +8,7 @@ import type {
   AdapterExecutionContext,
 } from "@paperclipai/adapter-utils";
 import { type } from "../metadata.js";
-import { execute, extractPrompt } from "./execute.js";
+import { execute, extractPrompt, wantsCompanyContext, wantsDelegation } from "./execute.js";
 import { readOllamaConfig } from "./config.js";
 
 export async function testEnvironment(
@@ -100,6 +100,14 @@ async function runLocalTest(): Promise<void> {
 
   if (!prompt.includes("Research natural numbers.") || !prompt.includes("Old task: What is 1 + 1?")) {
     throw new Error("Prompt extraction should prioritize wake comments while preserving task context.");
+  }
+
+  if (!wantsCompanyContext("check our org chart and tell me who can help")) {
+    throw new Error("Company context detection should catch org chart requests.");
+  }
+
+  if (!wantsDelegation("tell CTO to review this task")) {
+    throw new Error("Delegation detection should catch explicit handoff requests.");
   }
 
   const result = await execute({

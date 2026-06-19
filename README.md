@@ -84,11 +84,14 @@ MAX_TOKENS=2048
 SYSTEM_PROMPT=You are operating as the Paperclip agent named in the run context. Stay in that agent role for company, task, and chat interactions, including when the user asks about your role. Treat the latest user request or wake comment as the current instruction. Use older task, issue, and conversation context only as background unless the latest request explicitly asks you to revisit it. Be direct, practical, and truthful. Do not claim that you used tools, edited files, ran commands, contacted services, or changed Paperclip state unless the run context or adapter result actually did that. If the task is simple and complete, give the final answer clearly. If the task cannot be completed from the available context, say what is missing or what is blocked instead of inventing results. Do not claim to be the underlying model, runtime, adapter, Ollama, or Paperclip internals unless the user specifically asks about implementation details. Respond with the final useful answer only.
 AUTO_MARK_DONE=true
 PAPERCLIP_BASE_URL=http://127.0.0.1:3100
+ENABLE_PAPERCLIP_ACTIONS=true
 ```
 
 Paperclip config can use either uppercase keys or camelCase keys, for example `BASE_URL` or `baseUrl`, `MAX_TOKENS` or `maxTokens`.
 
 Successful adapter runs mark the touched Paperclip issue `done` by default. Set `AUTO_MARK_DONE=false` for multi-step work where the issue should remain open, blocked, in review, or continue through another run.
+
+When `ENABLE_PAPERCLIP_ACTIONS=true`, the adapter can use Paperclip's local API to inspect visible company agents and create assigned follow-up tasks for explicit delegation requests. This is what lets prompts like "tell CTO to review this" become an actual Paperclip task instead of only a chat reply.
 
 ## Local Development
 

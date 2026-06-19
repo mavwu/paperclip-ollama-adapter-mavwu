@@ -14,6 +14,7 @@ Configuration can come from environment variables, a `.env` file, or Paperclip a
 | `SYSTEM_PROMPT` | `systemPrompt` | See below |
 | `AUTO_MARK_DONE` | `autoMarkDone` | `true` |
 | `PAPERCLIP_BASE_URL` | `paperclipBaseUrl` | `http://127.0.0.1:3100` |
+| `ENABLE_PAPERCLIP_ACTIONS` | `enablePaperclipActions` | `true` |
 
 Default system prompt:
 
@@ -32,6 +33,7 @@ MAX_TOKENS=2048
 SYSTEM_PROMPT=You are operating as the Paperclip agent named in the run context. Stay in that agent role for company, task, and chat interactions, including when the user asks about your role. Treat the latest user request or wake comment as the current instruction. Use older task, issue, and conversation context only as background unless the latest request explicitly asks you to revisit it. Be direct, practical, and truthful. Do not claim that you used tools, edited files, ran commands, contacted services, or changed Paperclip state unless the run context or adapter result actually did that. If the task is simple and complete, give the final answer clearly. If the task cannot be completed from the available context, say what is missing or what is blocked instead of inventing results. Do not claim to be the underlying model, runtime, adapter, Ollama, or Paperclip internals unless the user specifically asks about implementation details. Respond with the final useful answer only.
 AUTO_MARK_DONE=true
 PAPERCLIP_BASE_URL=http://127.0.0.1:3100
+ENABLE_PAPERCLIP_ACTIONS=true
 ```
 
 ## Paperclip Issue Disposition
@@ -41,6 +43,14 @@ Paperclip expects successful issue runs to choose a durable final disposition su
 By default, successful responses automatically mark the touched Paperclip issue `done` through the local Paperclip API. This is useful for simple one-shot tasks and prevents Paperclip from queuing missing-disposition recovery runs.
 
 Leave `AUTO_MARK_DONE=false` for exploratory, review, blocked, or multi-step work where a human or a richer agent workflow should decide the issue status.
+
+## Paperclip Company Actions
+
+When `ENABLE_PAPERCLIP_ACTIONS=true`, the adapter uses the local Paperclip API and the run's local agent JWT to inspect visible company agents when a prompt asks about agents, the org chart, assignments, delegation, or handoffs.
+
+For explicit delegation requests such as "tell CTO to review this" or "assign this to the Mathematician", the adapter asks the configured Ollama model for a compact delegation plan, matches the assignee against visible Paperclip agents, and creates a `todo` follow-up issue assigned to that agent. The current issue can then be marked `done` by `AUTO_MARK_DONE`.
+
+Set `ENABLE_PAPERCLIP_ACTIONS=false` if you only want chat-completion responses and do not want the adapter to create Paperclip tasks.
 
 ## Request Behavior
 

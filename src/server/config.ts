@@ -9,6 +9,7 @@ export interface OllamaConfig {
   systemPrompt: string;
   paperclipBaseUrl: string;
   autoMarkDone: boolean;
+  enablePaperclipActions: boolean;
 }
 
 function readString(config: Record<string, unknown>, keys: string[], fallback: string): string {
@@ -76,5 +77,10 @@ export function readOllamaConfig(config: Record<string, unknown> = {}): OllamaCo
       "http://127.0.0.1:3100",
     ).replace(/\/+$/, ""),
     autoMarkDone: readBoolean(config, ["AUTO_MARK_DONE", "autoMarkDone"], true),
+    enablePaperclipActions: readBoolean(
+      config,
+      ["ENABLE_PAPERCLIP_ACTIONS", "enablePaperclipActions"],
+      true,
+    ),
   };
 }
