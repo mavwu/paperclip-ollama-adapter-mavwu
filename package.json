@@ -1,0 +1,48 @@
+{
+  "name": "paperclip-ollama-adapter-mavwu",
+  "version": "1.0.4",
+  "description": "Paperclip external adapter for Ollama and local LLMs",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./manifest": "./dist/manifest.js",
+    "./server": "./dist/server/index.js"
+  },
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CONFIGURATION.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && node dist/server/test.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "paperclip",
+    "paperclipai",
+    "adapter",
+    "ollama",
+    "llm",
+    "ai"
+  ],
+  "author": "Alfred Mavwu",
+  "license": "MIT",
+  "dependencies": {
+    "@paperclipai/adapter-utils": "^2026.609.0",
+    "axios": "^1.18.0",
+    "dotenv": "^16.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
