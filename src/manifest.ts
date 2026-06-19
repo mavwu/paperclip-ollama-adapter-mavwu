@@ -3,7 +3,7 @@ import { agentConfigurationDoc, label, models, type } from "./metadata.js";
 export const manifest = {
   name: "paperclip-ollama-adapter-mavwu",
   label,
-  version: "1.0.4",
+  version: "1.0.10",
   description: "Paperclip external adapter for Ollama and local LLMs",
   adapters: [
     {

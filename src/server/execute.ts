@@ -75,6 +75,19 @@ function compactJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+function buildAgentIdentityPrompt(context: AdapterExecutionContext | JsonObject): string | null {
+  const agentName = textFromValue(readPath(context, ["agent", "name"]));
+  if (!agentName) {
+    return null;
+  }
+
+  return [
+    "# Agent identity",
+    `You are ${agentName}.`,
+    "Answer as this Paperclip agent for company/task interactions.",
+  ].join("\n\n");
+}
+
 function buildPaperclipFallbackPrompt(context: AdapterExecutionContext | JsonObject): string | null {
   const runtimeContext = readPath(context, ["context"]);
   if (!isRecord(runtimeContext)) {
@@ -82,6 +95,11 @@ function buildPaperclipFallbackPrompt(context: AdapterExecutionContext | JsonObj
   }
 
   const parts: string[] = [];
+  const agentIdentity = buildAgentIdentityPrompt(context);
+  if (agentIdentity) {
+    parts.push(agentIdentity);
+  }
+
   const taskMarkdown = textFromValue(runtimeContext.paperclipTaskMarkdown);
   if (taskMarkdown) {
     parts.push(taskMarkdown);
@@ -155,13 +173,50 @@ function buildPaperclipFallbackPrompt(context: AdapterExecutionContext | JsonObj
   return null;
 }
 
+function buildWakeCommentPrompt(context: AdapterExecutionContext | JsonObject): string | null {
+  const runtimeContext = readPath(context, ["context"]);
+  if (!isRecord(runtimeContext)) {
+    return null;
+  }
+
+  const wakeCommentBody = textFromValue(readPath(runtimeContext, ["paperclipWakeComment", "body"]));
+  if (!wakeCommentBody) {
+    return null;
+  }
+
+  const parts = [
+    buildAgentIdentityPrompt(context),
+    "",
+    "# Current user request",
+    wakeCommentBody,
+    "",
+    "# Existing task context",
+    textFromValue(runtimeContext.paperclipTaskMarkdown) ??
+      [
+        textFromValue(readPath(runtimeContext, ["paperclipIssue", "title"])),
+        textFromValue(readPath(runtimeContext, ["paperclipIssue", "description"])),
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+    "",
+    "Treat the current user request as the latest instruction. Use the existing task context only as background.",
+  ];
+
+  return parts.filter((part) => typeof part === "string" && part.trim()).join("\n\n");
+}
+
 export function extractPrompt(context: AdapterExecutionContext | JsonObject): string {
+  const wakeCommentPrompt = buildWakeCommentPrompt(context);
+  if (wakeCommentPrompt) {
+    return wakeCommentPrompt;
+  }
+
   const candidatePaths = [
-    ["context", "paperclipTaskMarkdown"],
-    ["context", "paperclipIssue", "description"],
-    ["context", "paperclipIssue", "title"],
     ["context", "paperclipWakeComment", "body"],
     ["context", "paperclipContinuationSummary", "body"],
+    ["context", "paperclipIssue", "description"],
+    ["context", "paperclipIssue", "title"],
+    ["context", "paperclipTaskMarkdown"],
     ["prompt"],
     ["input"],
     ["message"],
@@ -183,7 +238,7 @@ export function extractPrompt(context: AdapterExecutionContext | JsonObject): st
   for (const path of candidatePaths) {
     const text = textFromValue(readPath(context, path));
     if (text) {
-      return text;
+      return [buildAgentIdentityPrompt(context), text].filter(Boolean).join("\n\n");
     }
   }
 
@@ -249,6 +304,52 @@ function readOptions(context: AdapterExecutionContext): JsonObject {
   };
 }
 
+function readIssueId(context: AdapterExecutionContext): string | null {
+  const value = readPath(context, ["context", "paperclipIssue", "id"]) ?? readPath(context, ["context", "issueId"]);
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+async function markIssueDone(context: AdapterExecutionContext, paperclipBaseUrl: string, comment: string): Promise<JsonObject> {
+  const issueId = readIssueId(context);
+  if (!issueId) {
+    return { attempted: false, reason: "missing_issue_id" };
+  }
+
+  if (!context.authToken) {
+    return { attempted: false, reason: "missing_auth_token" };
+  }
+
+  try {
+    await axios.patch(
+      `${paperclipBaseUrl}/api/issues/${encodeURIComponent(issueId)}`,
+      {
+        status: "done",
+        comment,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${context.authToken}`,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+
+    return { attempted: true, success: true, issueId, status: "done" };
+  } catch (error) {
+    const axiosError = error as AxiosError<{ error?: string; message?: string }>;
+    return {
+      attempted: true,
+      success: false,
+      issueId,
+      status: axiosError.response?.status ?? null,
+      error:
+        axiosError.response?.data?.error ??
+        axiosError.response?.data?.message ??
+        axiosError.message,
+    };
+  }
+}
+
 export async function execute(context: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const options = readOptions(context);
   const config = readOllamaConfig({ ...context.config, ...options });
@@ -290,6 +391,18 @@ export async function execute(context: AdapterExecutionContext): Promise<Adapter
     );
 
     const text = extractText(response.data);
+    const autoDisposition = config.autoMarkDone
+      ? await markIssueDone(context, config.paperclipBaseUrl, text)
+      : { attempted: false, reason: "disabled" };
+
+    await context.onLog(
+      "stdout",
+      `[paperclip-ollama-adapter] disposition ${JSON.stringify({
+        autoMarkDone: config.autoMarkDone,
+        paperclipBaseUrl: config.paperclipBaseUrl,
+        ...autoDisposition,
+      })}`,
+    );
 
     await context.onLog("stdout", text);
 
@@ -306,11 +419,16 @@ export async function execute(context: AdapterExecutionContext): Promise<Adapter
       summary: text,
       resultJson: {
         success: true,
+        stopReason: "completed",
+        summary: text,
+        result: text,
+        message: text,
         output: text,
         text,
         adapter: label,
         adapterType: type,
         model: config.model,
+        disposition: autoDisposition,
         usage: extractUsage(response.data) ?? null,
       },
       sessionId: context.runtime?.sessionId ?? null,

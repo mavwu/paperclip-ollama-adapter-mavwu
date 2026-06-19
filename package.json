@@ -1,6 +1,6 @@
 {
   "name": "paperclip-ollama-adapter-mavwu",
-  "version": "1.0.4",
+  "version": "1.0.10",
   "description": "Paperclip external adapter for Ollama and local LLMs",
   "type": "module",
   "main": "./dist/index.js",

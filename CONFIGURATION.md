@@ -8,15 +8,17 @@ Configuration can come from environment variables, a `.env` file, or Paperclip a
 | --- | --- | --- |
 | `BASE_URL` | `baseUrl` | `http://localhost:11434/v1` |
 | `API_KEY` | `apiKey` | `ollama` |
-| `MODEL` | `model` | `nemotron-3-super:cloud` |
+| `MODEL` | `model` | `qwen2.5-coder:1.5b` |
 | `TEMPERATURE` | `temperature` | `0.7` |
 | `MAX_TOKENS` | `maxTokens` | `2048` |
 | `SYSTEM_PROMPT` | `systemPrompt` | See below |
+| `AUTO_MARK_DONE` | `autoMarkDone` | `true` |
+| `PAPERCLIP_BASE_URL` | `paperclipBaseUrl` | `http://127.0.0.1:3100` |
 
 Default system prompt:
 
 ```text
-You are a model being used through a Paperclip adapter. Respond only with the final useful answer. Do not mention Paperclip, Ollama, NVIDIA, adapters, identity, reasoning, or internal system details unless the user specifically asks.
+You are operating as the Paperclip agent named in the run context. Stay in that agent role for company, task, and chat interactions, including when the user asks about your role. Treat the latest user request or wake comment as the current instruction. Use older task, issue, and conversation context only as background unless the latest request explicitly asks you to revisit it. Be direct, practical, and truthful. Do not claim that you used tools, edited files, ran commands, contacted services, or changed Paperclip state unless the run context or adapter result actually did that. If the task is simple and complete, give the final answer clearly. If the task cannot be completed from the available context, say what is missing or what is blocked instead of inventing results. Do not claim to be the underlying model, runtime, adapter, Ollama, or Paperclip internals unless the user specifically asks about implementation details. Respond with the final useful answer only.
 ```
 
 ## Example `.env`
@@ -24,11 +26,21 @@ You are a model being used through a Paperclip adapter. Respond only with the fi
 ```env
 BASE_URL=http://localhost:11434/v1
 API_KEY=ollama
-MODEL=nemotron-3-super:cloud
+MODEL=qwen2.5-coder:1.5b
 TEMPERATURE=0.7
 MAX_TOKENS=2048
-SYSTEM_PROMPT=You are a model being used through a Paperclip adapter. Respond only with the final useful answer. Do not mention Paperclip, Ollama, NVIDIA, adapters, identity, reasoning, or internal system details unless the user specifically asks.
+SYSTEM_PROMPT=You are operating as the Paperclip agent named in the run context. Stay in that agent role for company, task, and chat interactions, including when the user asks about your role. Treat the latest user request or wake comment as the current instruction. Use older task, issue, and conversation context only as background unless the latest request explicitly asks you to revisit it. Be direct, practical, and truthful. Do not claim that you used tools, edited files, ran commands, contacted services, or changed Paperclip state unless the run context or adapter result actually did that. If the task is simple and complete, give the final answer clearly. If the task cannot be completed from the available context, say what is missing or what is blocked instead of inventing results. Do not claim to be the underlying model, runtime, adapter, Ollama, or Paperclip internals unless the user specifically asks about implementation details. Respond with the final useful answer only.
+AUTO_MARK_DONE=true
+PAPERCLIP_BASE_URL=http://127.0.0.1:3100
 ```
+
+## Paperclip Issue Disposition
+
+Paperclip expects successful issue runs to choose a durable final disposition such as `done`, `blocked`, `in_review`, or a continuation path. This adapter is a direct Ollama chat-completion adapter, so it cannot perform a full tool-using workflow by itself.
+
+By default, successful responses automatically mark the touched Paperclip issue `done` through the local Paperclip API. This is useful for simple one-shot tasks and prevents Paperclip from queuing missing-disposition recovery runs.
+
+Leave `AUTO_MARK_DONE=false` for exploratory, review, blocked, or multi-step work where a human or a richer agent workflow should decide the issue status.
 
 ## Request Behavior
 
@@ -36,7 +48,7 @@ The adapter sends:
 
 ```json
 {
-  "model": "nemotron-3-super:cloud",
+  "model": "qwen2.5-coder:1.5b",
   "messages": [
     { "role": "system", "content": "configured system prompt" },
     { "role": "user", "content": "prompt extracted from Paperclip context" }

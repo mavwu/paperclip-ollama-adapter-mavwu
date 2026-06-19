@@ -8,7 +8,7 @@ import type {
   AdapterExecutionContext,
 } from "@paperclipai/adapter-utils";
 import { type } from "../metadata.js";
-import { execute } from "./execute.js";
+import { execute, extractPrompt } from "./execute.js";
 import { readOllamaConfig } from "./config.js";
 
 export async function testEnvironment(
@@ -75,6 +75,33 @@ export async function testEnvironment(
 }
 
 async function runLocalTest(): Promise<void> {
+  const prompt = extractPrompt({
+    runId: "local-test",
+    agent: {
+      id: "local-agent",
+      companyId: "local-company",
+      name: "Local Test Agent",
+      adapterType: type,
+      adapterConfig: {},
+    },
+    runtime: {
+      sessionId: null,
+      sessionParams: null,
+      sessionDisplayId: null,
+      taskKey: "local-test",
+    },
+    config: {},
+    context: {
+      paperclipTaskMarkdown: "Old task: What is 1 + 1?",
+      paperclipWakeComment: { body: "Research natural numbers." },
+    },
+    onLog: async () => {},
+  } satisfies AdapterExecutionContext);
+
+  if (!prompt.includes("Research natural numbers.") || !prompt.includes("Old task: What is 1 + 1?")) {
+    throw new Error("Prompt extraction should prioritize wake comments while preserving task context.");
+  }
+
   const result = await execute({
     runId: "local-test",
     agent: {
