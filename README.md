@@ -91,7 +91,7 @@ Paperclip config can use either uppercase keys or camelCase keys, for example `B
 
 Successful adapter runs mark the touched Paperclip issue `done` by default. Set `AUTO_MARK_DONE=false` for multi-step work where the issue should remain open, blocked, in review, or continue through another run.
 
-When `ENABLE_PAPERCLIP_ACTIONS=true`, the adapter can use Paperclip's local API to inspect visible company agents and create assigned follow-up tasks for explicit delegation requests. This is what lets prompts like "tell CTO to review this" become an actual Paperclip task instead of only a chat reply.
+When `ENABLE_PAPERCLIP_ACTIONS=true`, the adapter can use Paperclip's local API to inspect visible company agents and create assigned follow-up tasks for explicit delegation requests, as well as create new agents for hiring requests (e.g., 'hire a CTO'). This lets prompts like 'tell CTO to review this' become an actual Paperclip task, and prompts like 'hire a CTO' create a new agent in your company.
 
 ## Local Development
 

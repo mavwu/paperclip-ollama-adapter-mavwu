@@ -10,6 +10,17 @@ export interface OllamaConfig {
   paperclipBaseUrl: string;
   autoMarkDone: boolean;
   enablePaperclipActions: boolean;
+  runtimeSkills: PaperclipRuntimeSkill[];
+}
+
+export interface PaperclipRuntimeSkill {
+  key: string;
+  runtimeName: string;
+  source: string;
+  sourceStatus?: "available" | "missing";
+  missingDetail?: string | null;
+  required?: boolean;
+  requiredReason?: string | null;
 }
 
 function readString(config: Record<string, unknown>, keys: string[], fallback: string): string {
@@ -63,6 +74,34 @@ function readBoolean(config: Record<string, unknown>, keys: string[], fallback: 
   return fallback;
 }
 
+function readRuntimeSkills(config: Record<string, unknown>): PaperclipRuntimeSkill[] {
+  const raw = config.paperclipRuntimeSkills;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  const skills: PaperclipRuntimeSkill[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const key = String(entry.key ?? entry.name ?? "").trim();
+    const runtimeName = String(entry.runtimeName ?? entry.name ?? "").trim();
+    const source = String(entry.source ?? "").trim();
+    if (!key || !runtimeName || !source) continue;
+
+    skills.push({
+      key,
+      runtimeName,
+      source,
+      sourceStatus: entry.sourceStatus === "missing" ? "missing" : "available",
+      missingDetail: typeof entry.missingDetail === "string" && entry.missingDetail.trim() ? entry.missingDetail.trim() : null,
+      required: entry.required === true,
+      requiredReason: typeof entry.requiredReason === "string" && entry.requiredReason.trim() ? entry.requiredReason.trim() : null,
+    });
+  }
+
+  return skills;
+}
+
 export function readOllamaConfig(config: Record<string, unknown> = {}): OllamaConfig {
   return {
     baseUrl: readString(config, ["BASE_URL", "baseUrl"], "http://localhost:11434/v1").replace(/\/+$/, ""),
@@ -82,5 +121,6 @@ export function readOllamaConfig(config: Record<string, unknown> = {}): OllamaCo
       ["ENABLE_PAPERCLIP_ACTIONS", "enablePaperclipActions"],
       true,
     ),
+    runtimeSkills: readRuntimeSkills(config),
   };
 }
