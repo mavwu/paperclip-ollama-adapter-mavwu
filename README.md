@@ -180,3 +180,7 @@ On Windows, if local-path installation fails with `Received protocol 'c:'`, use 
 ## License
 
 MIT
+
+## Implementation guide
+
+See the [implementation guide](docs/PROJECT_GUIDE.md) for repository scope, local evaluation, code responsibilities, and verification expectations.
