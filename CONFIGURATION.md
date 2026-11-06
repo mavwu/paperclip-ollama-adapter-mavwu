@@ -2,6 +2,12 @@
 
 The adapter calls Ollama's OpenAI-compatible chat-completions endpoint. Configuration comes from Paperclip adapter config, process environment, or a local `.env` file loaded by dotenv.
 
+## Release support and rollout
+
+This reference describes the local 2.0.0 candidate. Read [migration and release notes](CHANGELOG.md) before replacing 1.0.10. Supported runtime: Node `>=24.11.1 <25`; Windows Node 24.11.1 is the fully verified environment. This range replaces the unverified Node >=18 declaration and covers both the fully tested runtime and the Node >=24.11.0 requirement of adapter-utils 2026.1023.0 resolved by a fresh npm install. The older source lockfile still resolves adapter-utils 2026.609.0; Node 18 probes apply only to that older graph.
+
+The [real inference smoke](docs/phase-2-live-inference-smoke.md) passed with `qwen2.5-coder:1.5b`. Keep `DELEGATION_STORAGE=disabled` for production: the [server integration findings](docs/phase-1-integration-findings-and-phase-2-poc.md) confirmed a non-atomic ownership check/create race and PostgreSQL document-creation deadlocks in the exercised build. Adapter-side rechecks and automatic write retries cannot establish safe ownership. Fix and validate the intended server revision, reconcile prior attempts and independently validate the full host lifecycle before reconsidering delegation. The storage setting is a technical capability, not rollout approval.
+
 ## Fields
 
 | Variable | camelCase | Default |
@@ -42,7 +48,8 @@ MODEL=qwen2.5-coder:1.5b
 TEMPERATURE=0.7
 MAX_TOKENS=2048
 AUTO_MARK_DONE=false
-ENABLE_PAPERCLIP_ACTIONS=true
+ENABLE_PAPERCLIP_ACTIONS=false
+DELEGATION_STORAGE=disabled
 ```
 
 ## URL and credential boundaries
@@ -195,6 +202,6 @@ The rendered inference prompt still uses the existing wake/task extraction paths
 
 `npm test` builds and runs the deterministic regression suite. Tests include mocked Axios calls, real Axios request/header serialization with intercepted Node transports, and native Node agent selection in child processes with final TCP/TLS socket constructors intercepted before network activity. A Socket.connect guard also intercepts previously captured connection functions. Each proxy-mode test uses a global-agent positive control to prove activation, then reports which mode was exercised. Unsupported `--use-env-proxy`, or an environment mode that does not activate on that Node version, is explicitly reported as skipped/unverified rather than passed. They do not perform DNS lookups, real TLS handshakes or external service calls. `npm run test:integration` separately runs an opt-in real model smoke test with company actions disabled and no company credentials or issue ID.
 
-Lifecycle tests use controlled abort-aware transports, real Axios with intercepted native requests, timer mocks and a monotonic clock mock. Clock-specific cases explicitly skip as unverified if the Node test runner lacks compatible mocking APIs. The full suite is verified on Windows with Node 24.11.1; the package runtime engine remains Node >=18, but this does not imply every older Node test-runner feature was exercised.
+Lifecycle tests use controlled abort-aware transports, real Axios with intercepted native requests, timer mocks and a monotonic clock mock. Clock-specific cases explicitly skip as unverified if the Node test runner lacks compatible mocking APIs. The full 484-test suite is verified on Windows with Node 24.11.1. The candidate declares Node `>=24.11.1 <25`. The previous minimum, Node 18.0.0, passes TypeScript no-emit compilation and package import, but lacks the `--test` CLI and modern test-runner APIs needed by the unchanged suite. Limited compatibility probes are not equivalent to the full security/lifecycle regression suite; broader runtime support requires a separate verified matrix.
 
 Use the external adapter installer, which imports the package root's `createServerAdapter`. The package no longer declares `paperclipPlugin.manifest`. The retained `./manifest` export is legacy metadata, not a valid current general-plugin manifest. See [README.md](README.md) for the pinned host reference and installation details.

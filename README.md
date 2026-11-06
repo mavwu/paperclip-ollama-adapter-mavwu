@@ -4,6 +4,18 @@ External Paperclip adapter for text inference through Ollama's OpenAI-compatible
 
 Package: `paperclip-ollama-adapter-mavwu` · Adapter type: `ollama_local`
 
+## Release candidate and verified scope
+
+Version **2.0.0** is an inference-focused major release candidate. See [release notes and migration from 1.0.10](CHANGELOG.md). It is prepared locally for review; it has not been published. Until publication, install the reviewed local tarball or a built checkout. An npm request for `@2.0.0` will not work yet.
+
+A real Mavwu → Ollama → Mavwu text-inference run passed on 6 November 2026 with `qwen2.5-coder:1.5b`, Ollama 0.32.5 and Node 24.11.1. The provider returned HTTP 200, final content `42` and 67 input / 3 output tokens; the adapter returned the same text with `success: true`, `stopReason: "response_received"` and `workflowCompleted: false`. One observed run took 5.394 seconds excluding model preload; this is a smoke-test observation, not a performance guarantee. Live cancellation and request/overall-deadline checks also passed. The [public smoke-test report](docs/phase-2-live-inference-smoke.md) records the scope and limits.
+
+The supported Node.js line for this candidate is **24.x, minimum 24.11.1** (`>=24.11.1 <25`). The complete 484-test suite is verified on Windows Node 24.11.1. This deliberately replaces the earlier unverified `>=18.0.0` support claim. The source lockfile's older dependency graph does not itself require Node 24. A fresh npm install under the existing ranges resolved adapter-utils 2026.1023.0 and Axios 1.21.0; that adapter-utils release and its shared package require Node >=24.11.0. Node 24.11.1 satisfies the current install graph and the fully verified security/lifecycle test environment. Node 18 can import, type-check and pass limited loopback probes with the older locked dependencies, but cannot run the unchanged full suite; other Node majors and operating systems are outside this candidate's verified matrix. See [runtime compatibility](CHANGELOG.md#runtime-compatibility).
+
+**Keep `DELEGATION_STORAGE=disabled` in production.** The tested Paperclip server has a confirmed ownership race and document-creation deadlocks. More adapter reads and blind retries do not repair those server defects. Full host scheduler/checkout/recovery integration has not been certified. The [integration findings](docs/phase-1-integration-findings-and-phase-2-poc.md) describe the exercised server build, concurrency evidence and rollout restrictions.
+
+The two reports above are included in the npm artifact, so their relative links work without unpublished GitHub files. They are historical evidence for baseline `ae810311fc6f6eee761a5317d239ce1842a1ba13`; their earlier version numbers, package counts and local-state statements describe that investigation, not the current candidate. Earlier coding-agent POC failures do not negate the later successful text-inference smoke test.
+
 ## Supported behavior
 
 - Sends a non-streaming request to `${BASE_URL}/chat/completions`.
@@ -22,7 +34,7 @@ Results distinguish:
 | `resultJson.stopReason` | Meaning |
 | --- | --- |
 | `response_received` | Usable model text was returned; no task-completion claim. |
-| `delegated` | Paperclip returned an issue ID for the follow-up; its execution is separate. |
+| `delegated` | A follow-up receipt and issue were verified; its execution is separate. |
 | `failed` | Inference or a required organizational operation could not be confirmed. |
 | `cancelled` | Host cancellation stopped the run; prior action receipts remain available. |
 | `timed_out` | A required request or overall budget expired; prior action receipts remain available. |
@@ -33,7 +45,7 @@ Paperclip or a capable agent workflow must own final disposition, review and con
 
 ## Configuration
 
-Provide values through Paperclip adapter config or the environment. Copy `.env.example` for local development:
+Provide values through Paperclip adapter config or the environment. In a source checkout, `.env.example` is available for local development; npm artifacts omit environment files. Package users can supply this conservative inference-only configuration directly:
 
 ```env
 BASE_URL=http://localhost:11434/v1
@@ -41,10 +53,11 @@ MODEL=qwen2.5-coder:1.5b
 TEMPERATURE=0.7
 MAX_TOKENS=2048
 AUTO_MARK_DONE=false
-ENABLE_PAPERCLIP_ACTIONS=true
+ENABLE_PAPERCLIP_ACTIONS=false
+DELEGATION_STORAGE=disabled
 ```
 
-Delegation writes additionally require trusted `DELEGATION_STORAGE=paperclip_documents_v1` on a verified compatible host. The default is `disabled`; ordinary inference and company reads remain available. The adapter verifies current issue/run ownership, then reserves one durable delegation slot on the source issue before creating a follow-up. Confirmed receipts can be reconciled by reads across runs; unresolved records block further creation. Verify the host contract and reconcile previous attempts before enabling this on existing tasks. See [durable delegation and ownership](CONFIGURATION.md#durable-delegation-and-ownership-phase-1-batch-3) for the storage, migration and recovery restrictions.
+The actual default for `ENABLE_PAPERCLIP_ACTIONS` remains `true`; the example explicitly disables company actions. Generic text inference needs no Paperclip token. Delegation writes additionally require trusted `DELEGATION_STORAGE=paperclip_documents_v1` on a verified compatible host. The default is `disabled`; ordinary inference and company reads remain available. The adapter verifies current issue/run ownership, then reserves one durable delegation slot on the source issue before creating a follow-up. Confirmed receipts can be reconciled by reads across runs; unresolved records block further creation. Verify the host contract and reconcile previous attempts before enabling this on existing tasks. See [durable delegation and ownership](CONFIGURATION.md#durable-delegation-and-ownership-phase-1-batch-3) for the storage, migration and recovery restrictions.
 
 `SYSTEM_PROMPT` is optional. Config supports uppercase and camelCase aliases, such as `MODEL`/`model`. Explicit config wins over host-resolved `config.env`, then process environment, then defaults. Task options can override only temperature and token limits. See [CONFIGURATION.md](CONFIGURATION.md) for the exact contract, alias policy, result semantics and limitations.
 
@@ -56,13 +69,13 @@ Omit `PAPERCLIP_BASE_URL` to use the host runtime URL; set it explicitly only fo
 
 The model list is a convenience list, not a capability certification. Any configured model must support the selected endpoint; delegation additionally needs reliable JSON planning. No native model tools are offered.
 
-`ENABLE_PAPERCLIP_ACTIONS=true` permits company lookup and follow-up creation. For example, “tell CTO to review this” can create a task if CTO resolves to one eligible visible agent and Paperclip authorizes the assignment. It does not transfer the original issue. “Hire a CTO” does not create an agent: hiring and approval handling are unimplemented.
+`ENABLE_PAPERCLIP_ACTIONS=true` permits company lookup; follow-up creation additionally requires the experimental storage opt-in and every ownership/receipt check described above. Keep that storage disabled in production. In a controlled test on a verified compatible host, “tell CTO to review this” can create a task if CTO resolves to one eligible visible agent and Paperclip authorizes the assignment. It does not transfer the original issue. “Hire a CTO” does not create an agent: hiring and approval handling are unimplemented.
 
 Generic prompts such as “Explain how a JavaScript agent works” do not request company data and work without a Paperclip token. Advice such as “Suggest a workflow for our team” may use optional enrichment; a missing token or failed lookup cannot block its general answer. Explicit reads such as “Who are our agents?” and delegation require authenticated company context and fail if it is unavailable or actions are disabled. Detection remains a limited phrase-based heuristic, not a general natural-language authorization system.
 
 ## Installation and external adapter contract
 
-Use Paperclip's **external adapter** installer with the package name, or a built local checkout. Its loader imports the package root and calls `createServerAdapter()`.
+Use Paperclip's **external adapter** installer with a published package name/version, or a built local checkout. For this unpublished candidate, use the built checkout or install its reviewed tarball in an isolated consumer with `npm install --ignore-scripts /absolute/path/paperclip-ollama-adapter-mavwu-2.0.0.tgz`; this npm command checks package consumption and does not itself register an adapter in Paperclip. The built checkout path remains the documented local host-installer route. Its loader imports the package root and calls `createServerAdapter()`.
 
 Root exports remain:
 
@@ -87,7 +100,7 @@ npm run build
 
 `npm test` builds and runs deterministic regression tests with Node's test runner. Alongside mocked Axios tests, network-boundary tests exercise real Axios serialization with intercepted Node transports. Child processes exercise native HTTP/HTTPS agent selection under Node environment proxy settings (including `--use-env-proxy` where supported), intercepting socket creation before DNS or TLS connection. Tests do not contact Ollama or Paperclip and cannot modify company data.
 
-The former live inference smoke test is separately opt-in:
+From a source checkout, a real inference smoke test is separately opt-in:
 
 ```bash
 npm run test:integration
@@ -95,9 +108,10 @@ npm run test:integration
 
 It requires a running Ollama endpoint and the configured model. It supplies no Paperclip token or issue ID and explicitly disables company actions. It validates inference, not persisted delegation or autonomous execution.
 
-Inspect distribution without publishing:
+Build before inspecting distribution without publishing (the dry-run does not run the build):
 
 ```bash
+npm run build
 npm pack --dry-run --ignore-scripts
 node -e "import('./dist/index.js').then(m => console.log(Object.keys(m)))"
 ```
@@ -121,6 +135,7 @@ Deadlines bound HTTP work and prevent subsequent requests. They are cooperative:
 - Tool calls are rejected because this adapter has no tool executor.
 - Provider errors retain safe message details and HTTP status. Diagnostic messages are capped at 512 characters; known secrets, sensitive headers/fields and URLs are redacted, and unsafe/oversized content is omitted. Credential classification explicitly separates authentication fields from public sampling settings, so token limits such as `2048` or `1` retain normal output and metadata. Known credential values are also redacted from ordinary logs and invocation metadata, including object keys. Raw response objects and stacks are never used as error messages.
 - Malformed optional issue identifiers are omitted while retaining a valid receipt ID. Required IDs and supplied assignment echoes are validated before reporting delegation; arbitrary provider objects never enter action metadata. See the configuration reference for receipt validation and credential/ID collision handling.
+- For the confirmed server-side ownership/deadlock limitations and current execution-prototype result, see [Phase 1 integration findings and the Phase 2 execution prototype](docs/phase-1-integration-findings-and-phase-2-poc.md).
 
 ## License
 

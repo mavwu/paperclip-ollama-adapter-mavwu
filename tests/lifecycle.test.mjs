@@ -14,14 +14,42 @@ const originalAdapter = axios.defaults.adapter;
 const originalHttp = http.request, originalHttps = https.request;
 const timeoutKeys = ["MODEL_REQUEST_TIMEOUT_MS", "modelRequestTimeoutMs", "PAPERCLIP_REQUEST_TIMEOUT_MS", "paperclipRequestTimeoutMs", "EXECUTION_TIMEOUT_MS", "executionTimeoutMs", "TIMEOUT_SEC", "timeoutSec"];
 let savedTimeoutEnv;
-let calls, respond, journalFixture;
+let calls, respond, journalFixture, deferreds;
 const chat = content => ({ choices: [{ message: { content }, finish_reason: "stop" }] });
 const agents = [{ id: "cto", name: "Alex", role: "cto", status: "idle" }];
 const plan = chat('{"shouldDelegate":true,"assigneeName":"CTO","title":"Review","description":"Review"}');
-function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
+function deferred() {
+  let resolve, reject, settled = false;
+  const promise = new Promise((yes, no) => {
+    resolve = value => { settled = true; yes(value); };
+    reject = error => { settled = true; no(error); };
+  });
+  const event = { promise, resolve, reject, get settled() { return settled; } };
+  deferreds?.push(event);
+  return event;
+}
+function waitForEvent(event, execution, label) {
+  // Settle the event too: a prerequisite failure must not leave a dangling gate.
+  const completed = execution.then(result => {
+    if (!event.settled) event.reject(new assert.AssertionError({ message: `Expected ${label} before execution settled: ${result.errorCode ?? result.status ?? result.resultJson?.stopReason ?? "completed"}` }));
+    return event.promise;
+  }, error => { event.reject(error); return event.promise; });
+  return Promise.race([event.promise, completed]);
+}
 function enableTimers(t) {
-  try { t.mock.timers.enable({ apis: ["setTimeout"] }); return true; }
-  catch { t.skip(`Compatible Node timer mocking is unavailable on ${process.version}; deterministic deadline scheduling is unverified`); return false; }
+  let now = 0;
+  try {
+    t.mock.method(performance, "now", () => now);
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+  } catch {
+    t.skip(`Compatible timer/monotonic mocking is unavailable on ${process.version}; deterministic deadline scheduling is unverified`);
+    return null;
+  }
+  return {
+    tick(ms) { now += ms; t.mock.timers.tick(ms); },
+    // Model event-loop descheduling before overdue timer callbacks can run.
+    elapseWithoutCallbacks(ms) { now += ms; },
+  };
 }
 function run(config = {}, prompt = "Explain addition") {
   return { runId: "lifecycle-run", agent: { id: "ceo", companyId: "company", name: "CEO", adapterType: "ollama_local", adapterConfig: {} }, runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: "issue" },
@@ -31,7 +59,7 @@ function run(config = {}, prompt = "Explain addition") {
 beforeEach(() => {
   savedTimeoutEnv = Object.fromEntries(timeoutKeys.map(key => [key, process.env[key]]));
   for (const key of timeoutKeys) delete process.env[key];
-  calls = []; journalFixture = delegationFixture({ company: "company", source: "issue" });
+  calls = []; deferreds = []; journalFixture = delegationFixture({ company: "company", source: "issue" });
   respond = () => chat("Answer");
   axios.defaults.adapter = async config => {
     const auxiliary = journalFixture.auxiliary(config); if (auxiliary) return auxiliary;
@@ -43,6 +71,7 @@ beforeEach(() => {
 afterEach(() => {
   axios.defaults.adapter = originalAdapter; http.request = originalHttp; https.request = originalHttps;
   for (const key of timeoutKeys) { if (savedTimeoutEnv[key] === undefined) delete process.env[key]; else process.env[key] = savedTimeoutEnv[key]; }
+  assert.ok(deferreds.every(event => event.settled), "Fixture left unresolved synchronization gates");
 });
 function delegation(write = () => ({ id: "child", assigneeAgentId: "cto", identifier: "TEST-2" })) {
   respond = config => config.method === "get" ? agents : config.url.endsWith("/issues") ? write(config) : plan;
@@ -105,7 +134,7 @@ test("dispatch callback cancellation is rechecked before the request", async () 
 test("cancellation aborts in-flight inference and does not become a successful response", async () => {
   const started = deferred(), controller = new AbortController(); respond = config => stalled(config, started);
   const pending = execute({ ...run(), signal: controller.signal });
-  const config = await started.promise; controller.abort();
+  const config = await waitForEvent(started, pending, "transport start"); controller.abort();
   stopped(await pending, "cancelled"); assert.equal(config.signal.aborted, true); assert.equal(calls.length, 1);
 });
 
@@ -120,7 +149,7 @@ test("cancellation during the planner prevents delegation writes", async () => {
 test("cancellation during issue creation preserves an uncertain write and never retries", async () => {
   const started = deferred(), controller = new AbortController(); delegation(config => stalled(config, started));
   const pending = execute({ ...run({}, "Delegate to CTO"), signal: controller.signal });
-  await started.promise; controller.abort(); const result = await pending;
+  await waitForEvent(started, pending, "transport start"); controller.abort(); const result = await pending;
   stopped(result, "cancelled");
   assert.equal(result.resultJson.actions.at(-1).persistence, "unknown");
   assert.equal(result.resultJson.actions.at(-1).attempted, true);
@@ -147,8 +176,8 @@ test("a received receipt survives Axios's post-response cancellation check", asy
 });
 
 test("a write receipt received at request timeout retains its ID but the run is timed out", async t => {
-  if (!enableTimers(t)) return;
-  delegation(() => { t.mock.timers.tick(25); return { id: "child", assigneeAgentId: "cto" }; });
+  const clock = enableTimers(t); if (!clock) return;
+  delegation(() => { clock.tick(25); return { id: "child", assigneeAgentId: "cto" }; });
   const result = await execute(run({ PAPERCLIP_REQUEST_TIMEOUT_MS: 25 }, "Delegate to CTO"));
   stopped(result, "PAPERCLIP_REQUEST_TIMEOUT");
   assert.equal(result.resultJson.actions.at(-1).issueId, "child");
@@ -162,16 +191,16 @@ test("cancellation arriving during error logging remains cancellation", async ()
 });
 
 test("the overall budget is shared by lookup and planning", async t => {
-  if (!enableTimers(t)) return; const started = deferred();
-  respond = config => { if (config.method === "get") { t.mock.timers.tick(10); return agents; } return stalled(config, started); };
+  const clock = enableTimers(t); if (!clock) return; const started = deferred();
+  respond = config => { if (config.method === "get") { clock.tick(10); return agents; } return stalled(config, started); };
   const pending = execute(run({ EXECUTION_TIMEOUT_MS: 25 }, "Delegate to CTO"));
-  await started.promise; t.mock.timers.tick(15);
+  await waitForEvent(started, pending, "transport start"); clock.tick(15);
   stopped(await pending, "EXECUTION_DEADLINE_EXCEEDED"); assert.equal(calls.length, 2);
 });
 
 test("overall timeout after a confirmed write preserves the receipt", async t => {
-  if (!enableTimers(t)) return; delegation();
-  const result = await execute({ ...run({ EXECUTION_TIMEOUT_MS: 25 }, "Delegate to CTO"), onMeta: async () => { t.mock.timers.tick(25); } });
+  const clock = enableTimers(t); if (!clock) return; delegation();
+  const result = await execute({ ...run({ EXECUTION_TIMEOUT_MS: 25 }, "Delegate to CTO"), onMeta: async () => { clock.tick(25); } });
   stopped(result, "EXECUTION_DEADLINE_EXCEEDED"); assert.equal(result.resultJson.actions.at(-1).issueId, "child");
 });
 
@@ -186,7 +215,7 @@ for (const mode of ["ask", "planning", "skill_test", "unknown"]) {
 for (const target of ["model", "paperclip"]) {
   for (const stop of ["cancel", "request_timeout"]) {
     test(`native Axios abort destroys the ${target} request on ${stop}`, async t => {
-      if (!enableTimers(t)) return;
+      const clock = enableTimers(t); if (!clock) return;
       axios.defaults.adapter = "http"; const started = deferred(), controller = new AbortController();
       const requests = [];
       const nativeRequest = options => {
@@ -196,9 +225,9 @@ for (const target of ["model", "paperclip"]) {
       };
       http.request = nativeRequest; https.request = nativeRequest;
       const ctx = { ...run({ MODEL_REQUEST_TIMEOUT_MS: 25, PAPERCLIP_REQUEST_TIMEOUT_MS: 25 }, target === "model" ? "Explain addition" : "Who are our agents?"), signal: controller.signal };
-      const pending = execute(ctx); await started.promise;
+      const pending = execute(ctx); await waitForEvent(started, pending, "transport start");
       assert.equal(requests[0].req.destroyed, false);
-      if (stop === "cancel") controller.abort(); else t.mock.timers.tick(25);
+      if (stop === "cancel") controller.abort(); else clock.tick(25);
       const result = await pending;
       stopped(result, stop === "cancel" ? "cancelled" : target === "model" ? "MODEL_REQUEST_TIMEOUT" : "PAPERCLIP_REQUEST_TIMEOUT");
       assert.equal(requests.length, 1); assert.equal(requests[0].req.destroyed, true);
@@ -208,28 +237,39 @@ for (const target of ["model", "paperclip"]) {
   }
 }
 
+function interceptDelegationRequests(t, beforeResponse = () => {}) {
+  axios.defaults.adapter = "http";
+  const started = deferred(), requests = [];
+  const cleanup = () => { for (const { req } of requests) req.destroy(); };
+  t.after(cleanup);
+  const nativeRequest = (options, callback) => {
+    let body = "";
+    const req = new Writable({ autoDestroy: false, write(chunk, _e, done) { body += chunk.toString(); done(); }, final(done) {
+      done();
+      if (options.path.endsWith("/issues")) { started.resolve(req); return; }
+      queueMicrotask(() => {
+        beforeResponse();
+        if (req.destroyed) return;
+        const prepared = { url: `https://fixture.invalid${options.path}`, method: options.method.toLowerCase(), headers: options.headers, data: body || undefined };
+        const auxiliary = journalFixture.auxiliary(prepared);
+        const response = Readable.from([JSON.stringify(auxiliary ? auxiliary.data : options.method === "GET" ? agents : plan)]);
+        response.statusCode = auxiliary?.status ?? 200; response.headers = { "content-type": "application/json" }; response.req = req; callback(response);
+      });
+    } });
+    req.setTimeout = () => req; req.setKeepAlive = () => req; requests.push({ options, req }); return req;
+  };
+  http.request = nativeRequest; https.request = nativeRequest;
+  return { started, requests, cleanup };
+}
+
 for (const stop of ["cancel", "timeout"]) {
   test(`native Axios ${stop} during POST is uncertain and never replayed`, async t => {
-    if (!enableTimers(t)) return; axios.defaults.adapter = "http";
-    const started = deferred(), controller = new AbortController(), requests = [];
-    const nativeRequest = (options, callback) => {
-      let body = "";
-      const req = new Writable({ autoDestroy: false, write(chunk, _e, done) { body += chunk.toString(); done(); }, final(done) {
-        done();
-        if (options.path.endsWith("/issues")) { started.resolve(req); return; }
-        queueMicrotask(() => {
-          const prepared = { url: `https://fixture.invalid${options.path}`, method: options.method.toLowerCase(), headers: options.headers, data: body || undefined };
-          const auxiliary = journalFixture.auxiliary(prepared);
-          const response = Readable.from([JSON.stringify(auxiliary ? auxiliary.data : options.method === "GET" ? agents : plan)]);
-          response.statusCode = auxiliary?.status ?? 200; response.headers = { "content-type": "application/json" }; response.req = req; callback(response);
-        });
-      } });
-      req.setTimeout = () => req; req.setKeepAlive = () => req; requests.push({ options, req }); return req;
-    };
-    http.request = nativeRequest; https.request = nativeRequest;
+    const clock = enableTimers(t); if (!clock) return;
+    const { started, requests } = interceptDelegationRequests(t), controller = new AbortController();
     const pending = execute({ ...run({ PAPERCLIP_REQUEST_TIMEOUT_MS: 25 }, "Delegate to CTO"), signal: controller.signal });
-    const post = await started.promise; assert.equal(post.destroyed, false);
-    if (stop === "cancel") controller.abort(); else t.mock.timers.tick(25);
+    const post = await waitForEvent(started, pending, "issue-creation POST"); assert.equal(post.destroyed, false);
+    assert.equal(started.settled, true);
+    if (stop === "cancel") controller.abort(); else clock.tick(25);
     const result = await pending;
     stopped(result, stop === "cancel" ? "cancelled" : "PAPERCLIP_REQUEST_TIMEOUT");
     assert.equal(post.destroyed, true);
@@ -239,30 +279,58 @@ for (const stop of ["cancel", "timeout"]) {
   });
 }
 
+for (const scheduling of ["before overdue callbacks", "with timer callbacks"]) {
+  test(`pre-POST deadline fails the event gate promptly ${scheduling}`, async t => {
+    const clock = enableTimers(t); if (!clock) return;
+    let delayed = false;
+    const { started, requests, cleanup } = interceptDelegationRequests(t, () => {
+      if (delayed) return;
+      delayed = true;
+      // Deterministic equivalent of the review's 60 ms scheduling pause.
+      if (scheduling === "before overdue callbacks") clock.elapseWithoutCallbacks(60);
+      else clock.tick(60);
+    });
+    const pending = execute(run({ PAPERCLIP_REQUEST_TIMEOUT_MS: 25 }, "Delegate to CTO"));
+    await assert.rejects(waitForEvent(started, pending, "issue-creation POST"), error => {
+      assert.equal(error.code, "ERR_ASSERTION");
+      assert.match(error.message, /Expected issue-creation POST before execution settled: PAPERCLIP_REQUEST_TIMEOUT/);
+      return true;
+    });
+    stopped(await pending, "PAPERCLIP_REQUEST_TIMEOUT");
+    assert.equal(started.settled, true); // The losing gate is rejected, not abandoned.
+    assert.equal(requests.filter(({ options }) => options.path.endsWith("/issues")).length, 0);
+    cleanup();
+    assert.ok(requests.every(({ req }) => req.destroyed));
+    const count = requests.length;
+    clock.tick(10000);
+    assert.equal(requests.length, count); // No late work after all execution promises settle.
+  });
+}
+
 for (const [field, code, prompt] of [["MODEL_REQUEST_TIMEOUT_MS", "MODEL_REQUEST_TIMEOUT", "Explain addition"], ["EXECUTION_TIMEOUT_MS", "EXECUTION_DEADLINE_EXCEEDED", "Explain addition"], ["PAPERCLIP_REQUEST_TIMEOUT_MS", "PAPERCLIP_REQUEST_TIMEOUT", "Who are our agents?"]]) {
   test(`${field} aborts stalled requests with distinct timeout reporting`, async t => {
-    if (!enableTimers(t)) return;
+    const clock = enableTimers(t); if (!clock) return;
     const started = deferred(); respond = config => stalled(config, started);
     const pending = execute(run({ [field]: 25 }, prompt));
-    const request = await started.promise; t.mock.timers.tick(25);
+    const request = await waitForEvent(started, pending, "transport start"); clock.tick(25);
     stopped(await pending, code); assert.equal(request.signal.aborted, true); assert.equal(calls.length, 1);
   });
 }
 
 test("optional company request timeout remains nonfatal to inference", async t => {
-  if (!enableTimers(t)) return; const started = deferred();
+  const clock = enableTimers(t); if (!clock) return; const started = deferred();
   respond = config => config.method === "get" ? stalled(config, started) : chat("General advice");
   const pending = execute(run({ PAPERCLIP_REQUEST_TIMEOUT_MS: 25 }, "Suggest a workflow for our team"));
-  await started.promise; t.mock.timers.tick(25); const result = await pending;
+  await waitForEvent(started, pending, "transport start"); clock.tick(25); const result = await pending;
   assert.equal(result.exitCode, 0); assert.equal(result.timedOut, false);
   assert.equal(result.resultJson.actions[0].errorCode, "PAPERCLIP_REQUEST_TIMEOUT");
   assert.equal(result.resultJson.actions[0].required, false); assert.equal(calls.length, 2);
 });
 
 test("overall deadline bounds additional work after a slow readiness callback settles", async t => {
-  if (!enableTimers(t)) return; const ready = deferred(), finish = deferred();
+  const clock = enableTimers(t); if (!clock) return; const ready = deferred(), finish = deferred();
   const ctx = { ...run({ EXECUTION_TIMEOUT_MS: 25 }), signal: new AbortController().signal, onCancellationReady: async () => { ready.resolve(); await finish.promise; } };
-  const pending = execute(ctx); await ready.promise; t.mock.timers.tick(25); finish.resolve();
+  const pending = execute(ctx); await waitForEvent(ready, pending, "cancellation readiness"); clock.tick(25); finish.resolve();
   stopped(await pending, "EXECUTION_DEADLINE_EXCEEDED"); assert.equal(calls.length, 0);
 });
 
@@ -311,20 +379,20 @@ test("multi-request delegation registers and dispatches exactly once", async () 
 
 test("host cancellation reasons cannot impersonate request timeouts", async () => {
   const controller = new AbortController(), started = deferred(); respond = config => stalled(config, started);
-  const pending = execute({ ...run(), signal: controller.signal }); await started.promise;
+  const pending = execute({ ...run(), signal: controller.signal }); await waitForEvent(started, pending, "transport start");
   controller.abort(new Error("MODEL_REQUEST_TIMEOUT private host detail"));
   const result = await pending; stopped(result, "cancelled"); assert.ok(!JSON.stringify(result).includes("private host detail"));
 });
 
 test("callback and deadline cleanup removes host listeners and request timers", async t => {
-  if (!enableTimers(t)) return; const controller = new AbortController();
+  const clock = enableTimers(t); if (!clock) return; const controller = new AbortController();
   const add = controller.signal.addEventListener.bind(controller.signal), remove = controller.signal.removeEventListener.bind(controller.signal);
   let added = 0, removed = 0;
   controller.signal.addEventListener = (...args) => { added++; return add(...args); };
   controller.signal.removeEventListener = (...args) => { removed++; return remove(...args); };
   const result = await execute({ ...run(), signal: controller.signal });
   assert.equal(result.exitCode, 0); assert.equal(added, 1); assert.equal(removed, 1);
-  controller.abort(); t.mock.timers.tick(10000);
+  controller.abort(); clock.tick(10000);
   assert.equal(calls[0].signal.aborted, false); assert.equal(calls.length, 1);
 });
 
@@ -363,9 +431,9 @@ for (const [status, persistence] of [[408, "unknown"], [499, "unknown"], [429, "
 }
 
 test("environment probe honors the shorter configured request budget", async t => {
-  if (!enableTimers(t)) return; const started = deferred(); respond = config => stalled(config, started);
+  const clock = enableTimers(t); if (!clock) return; const started = deferred(); respond = config => stalled(config, started);
   const pending = testEnvironment({ companyId: "company", adapterType: "ollama_local", config: run({ MODEL_REQUEST_TIMEOUT_MS: 25 }).config });
-  await started.promise; t.mock.timers.tick(25); const result = await pending;
+  await waitForEvent(started, pending, "transport start"); clock.tick(25); const result = await pending;
   assert.equal(result.status, "fail"); assert.match(result.checks.at(-1).detail, /exceeded its deadline/);
 });
 
