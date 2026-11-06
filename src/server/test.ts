@@ -9,17 +9,20 @@ import { readResponseText } from "./response.js";
 import { readOllamaConfig } from "./config.js";
 import { collectDiagnosticSecrets, describeError, redactKnownSecrets, sanitizeDiagnosticText } from "./diagnostics.js";
 import { createServiceClients } from "./http.js";
+import { ExecutionControl } from "./lifecycle.js";
 
 export async function testEnvironment(
   context: AdapterEnvironmentTestContext,
 ): Promise<AdapterEnvironmentTestResult> {
   const secrets = collectDiagnosticSecrets(process.env, context.config);
   const checks: AdapterEnvironmentCheck[] = [];
+  let control: ExecutionControl | undefined;
 
   try {
     const config = readOllamaConfig(context.config);
     // Only supplied credentials are secrets; the implicit "ollama" default is public.
-    const clients = createServiceClients(config, undefined, 30_000);
+    control = new ExecutionControl({}, Math.min(config.executionTimeoutMs, 30_000));
+    const clients = createServiceClients(config, undefined, 30_000, control);
     checks.push({
       code: "ollama_config",
       level: "info",
@@ -66,5 +69,7 @@ export async function testEnvironment(
       checks,
       testedAt: new Date().toISOString(),
     };
+  } finally {
+    control?.dispose();
   }
 }

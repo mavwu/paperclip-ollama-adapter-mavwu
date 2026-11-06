@@ -9,6 +9,10 @@ import { ConfigurationError, readOllamaConfig } from "./config.js";
 import type { OllamaConfig } from "./config.js";
 import { createServiceClients } from "./http.js";
 import type { ServiceClients } from "./http.js";
+import { WriteRequestError } from "./http.js";
+import { ExecutionControl, ExecutionError, executionError, executionErrorCode } from "./lifecycle.js";
+import type { LifecycleContext } from "./lifecycle.js";
+import { performance } from "node:perf_hooks";
 import { ModelResponseError, readResponseText } from "./response.js";
 import { collectDiagnosticSecrets, describeError, errorHttpStatus, redactInvocation, redactKnownSecrets, sanitizeDiagnosticText } from "./diagnostics.js";
 
@@ -330,7 +334,7 @@ async function fetchPaperclipAgents(
   context: AdapterExecutionContext,
   clients: ServiceClients,
   secrets: readonly string[],
-): Promise<{ ok: true; agents: PaperclipAgentSummary[] } | { ok: false; error: string }> {
+): Promise<{ ok: true; agents: PaperclipAgentSummary[] } | { ok: false; error: string; errorCode?: string }> {
   const companyId = readCompanyId(context);
   if (!companyId) return { ok: false, error: "missing_company_id" };
   if (!context.authToken) return { ok: false, error: "missing_auth_token" };
@@ -341,9 +345,12 @@ async function fetchPaperclipAgents(
     const agents = response.data.map(normalizeAgent).filter((agent): agent is PaperclipAgentSummary => Boolean(agent));
     return { ok: true, agents };
   } catch (error) {
+    const interruption = executionError(error);
+    if (interruption && interruption.code !== "PAPERCLIP_REQUEST_TIMEOUT") throw interruption;
     return {
       ok: false,
       error: describeError(error, secrets),
+      ...(interruption ? { errorCode: interruption.code } : {}),
     };
   }
 }
@@ -493,7 +500,7 @@ async function preparePaperclipActionContext(
         "# Paperclip company context",
         "Authenticated company context is unavailable. Answer only the general part of the request; do not invent internal company facts or claim organizational actions.",
       ].join("\n\n"),
-      actions: [{ type: "fetch_agents", success: false, required, error: agentsResult.error }],
+      actions: [{ type: "fetch_agents", success: false, required, error: agentsResult.error, ...(agentsResult.errorCode ? { errorCode: agentsResult.errorCode } : {}) }],
     };
   }
 
@@ -534,18 +541,19 @@ async function createDelegatedIssue(
         assigneeAgentId: assignee.id,
       },
     );
+    const interrupted = response.interruption ? { errorCode: response.interruption.code } : {};
 
     // Required identity is an opaque, nonblank scalar, never arbitrary JSON.
     // Do not normalize IDs or copy unvalidated optional provider fields.
     if (!isRecord(response.data) || !validReceiptId(response.data.id, secrets)) {
-      return { attempted: true, success: false, reason: "invalid_issue_receipt", error: "Paperclip returned no safe scalar issue ID; creation outcome is unverified. Do not retry blindly." };
+      return { attempted: true, success: false, persistence: "unknown", ...interrupted, reason: "invalid_issue_receipt", error: "Paperclip returned no safe scalar issue ID; creation outcome is unverified. Do not retry blindly." };
     }
     // Legacy receipts may omit the assignment echo. Any supplied value must be
     // a matching string; null, objects and mismatches cannot confirm assignment.
     if (response.data.assigneeAgentId !== undefined &&
         (typeof response.data.assigneeAgentId !== "string" || response.data.assigneeAgentId !== assignee.id)) {
       return {
-        attempted: true, success: false, issueId: response.data.id, reason: "assignment_not_verified",
+        attempted: true, success: false, persistence: "confirmed", ...interrupted, issueId: response.data.id, reason: "assignment_not_verified",
         error: "The returned issue is not assigned to the requested agent. Check Paperclip state before retrying.",
       };
     }
@@ -556,15 +564,21 @@ async function createDelegatedIssue(
     return {
       attempted: true,
       success: true,
+      persistence: "confirmed",
+      ...interrupted,
       issueId: response.data.id,
       identifier,
       assigneeAgentId: assignee.id,
       assigneeName: redactKnownSecrets(assignee.name, secrets),
     };
   } catch (error) {
+    const writeFailure = error instanceof WriteRequestError ? error : undefined;
+    const interruption = writeFailure?.interruption ?? executionError(error);
     return {
-      attempted: true,
+      attempted: writeFailure?.attempted ?? !interruption,
       success: false,
+      persistence: writeFailure?.persistence ?? (interruption ? "not_attempted" : "unknown"),
+      ...(interruption ? { errorCode: interruption.code } : {}),
       status: errorHttpStatus(error) ?? null,
       assigneeAgentId: assignee.id,
       assigneeName: sanitizeDiagnosticText(assignee.name, secrets),
@@ -590,6 +604,7 @@ async function maybeCreateDelegatedIssue(
   try {
     decision = await planDelegation(config, prompt, agents, clients);
   } catch (error) {
+    if (executionError(error)) throw error;
     return {
       text: "I could not create the delegated task because the delegation planner failed.",
       action: {
@@ -631,7 +646,7 @@ async function maybeCreateDelegatedIssue(
   }
 
   return {
-    text: `I could not confirm a follow-up task for ${assignee.name}: ${String(action.error ?? action.reason ?? "unknown error")}. No automatic retry was performed.`,
+    text: `I could not confirm a follow-up task for ${assignee.name}: ${String(action.error ?? action.reason ?? "unknown error")}.${action.persistence === "unknown" ? " Issue creation may have persisted; inspect Paperclip state before retrying." : ""} No automatic retry was performed.`,
     action: { type: "delegate_issue", ...action },
   };
 }
@@ -640,16 +655,16 @@ function executionResult(
   context: AdapterExecutionContext,
   config: Pick<OllamaConfig, "model" | "autoMarkDone">,
   text: string,
-  outcome: "response_received" | "delegated" | "failed",
+  outcome: "response_received" | "delegated" | "failed" | "cancelled" | "timed_out",
   actions: JsonObject[],
   usage?: UsageSummary,
   errorCode?: string,
 ): AdapterExecutionResult {
-  const success = outcome !== "failed";
+  const success = outcome === "response_received" || outcome === "delegated";
   return {
     exitCode: success ? 0 : 1,
     signal: null,
-    timedOut: false,
+    timedOut: outcome === "timed_out",
     ...(success ? {} : { errorMessage: text, errorCode }),
     usage,
     provider: "ollama",
@@ -661,6 +676,7 @@ function executionResult(
     resultJson: {
       success,
       stopReason: outcome,
+      ...(outcome === "cancelled" ? { status: "cancelled" } : {}),
       // A generated answer or created child is not evidence that the source task is complete.
       workflowCompleted: false,
       ...(success ? {} : { error: text, errorCode }),
@@ -682,33 +698,54 @@ function executionResult(
   };
 }
 
-export async function execute(context: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+export async function execute(context: LifecycleContext): Promise<AdapterExecutionResult> {
+  const startedAt = performance.now();
+  let control: ExecutionControl | undefined;
   let config: OllamaConfig | undefined;
   const unconfigured = { model: "unconfigured", autoMarkDone: false };
   const request = actionRequest(context);
   const secrets = collectDiagnosticSecrets(process.env, context.config, readOptions(context), { authToken: context.authToken });
   const actions: JsonObject[] = [];
-  const log: AdapterExecutionContext["onLog"] = (stream, text) => context.onLog(stream, redactKnownSecrets(text, secrets));
-  const meta: AdapterExecutionContext["onMeta"] = value => context.onMeta?.(redactInvocation(value, secrets)) ?? Promise.resolve();
+  const log: AdapterExecutionContext["onLog"] = async (stream, text) => { control?.check(); await context.onLog(stream, redactKnownSecrets(text, secrets)); control?.check(); };
+  const meta: AdapterExecutionContext["onMeta"] = async value => { control?.check(); await context.onMeta?.(redactInvocation(value, secrets)); control?.check(); };
   let usage: UsageSummary | undefined;
   let requestingModel = false;
+  const stoppedResult = (interruption: ExecutionError) => {
+    const writeNote = actions.some(action => action.persistence === "unknown")
+      ? " Issue creation may have persisted; its outcome is unverified. Inspect Paperclip state before retrying."
+      : actions.some(action => action.persistence === "confirmed") ? " A prior issue-creation receipt is preserved; stopping this run does not undo that write." : "";
+    return executionResult(context, config ?? unconfigured, interruption.message + writeNote,
+      interruption.code === "cancelled" ? "cancelled" : interruption.timedOut ? "timed_out" : "failed", actions, usage, interruption.code);
+  };
   const finish = async (text: string, outcome: "response_received" | "delegated" | "failed", errorCode?: string) => {
+    control?.check();
+    const stoppedCode = executionErrorCode(errorCode);
+    if (stoppedCode) throw new ExecutionError(stoppedCode);
     text = redactKnownSecrets(text, secrets);
     if (outcome === "failed") text = sanitizeDiagnosticText(text, secrets);
     const result = executionResult(context, config ?? unconfigured, text, outcome, actions, usage, errorCode);
     if (actions.length > 0) await log("stdout", `[paperclip-ollama-adapter] actions ${JSON.stringify({ actions })}`);
     await log("stdout", `[paperclip-ollama-adapter] disposition ${JSON.stringify(result.resultJson?.disposition)}`);
     await log(outcome === "failed" ? "stderr" : "stdout", text);
+    control?.check();
     return result;
   };
 
   try {
     config = readOllamaConfig(context.config, readOptions(context));
+    control = new ExecutionControl(context, config.executionTimeoutMs, startedAt);
     // Secrets come from supplied config/environment/token values above. The
     // implicit public "ollama" placeholder is not a secret; explicit keys are.
-    const clients = createServiceClients(config, context.authToken);
+    const clients = createServiceClients(config, context.authToken, undefined, control);
+    await control.ready();
     let prompt = extractPrompt(context);
     const required = requiresCompanyContext(request) || wantsDelegation(request);
+    const workMode = readPath(context, ["context", "paperclipIssue", "workMode"]);
+    const jwtScope = readPath(context, ["context", "paperclipAgentJwtScope", "kind"]);
+    if (wantsDelegation(request) && ((workMode !== undefined && workMode !== "standard") || jwtScope === "skill_test")) {
+      actions.push({ type: "delegate_issue", attempted: false, success: false, persistence: "not_attempted", reason: "work_mode_unsupported" });
+      return await finish("This work mode does not permit this adapter to create delegated tasks. No task was created.", "failed", "PAPERCLIP_WORK_MODE_UNSUPPORTED");
+    }
     if (!config.enablePaperclipActions && required) {
       actions.push({ type: wantsDelegation(request) ? "delegate_issue" : "fetch_agents", attempted: false, success: false, required: true, reason: "actions_disabled" });
       return await finish("The requested organizational operation requires Paperclip actions, which are disabled. No action was performed.", "failed", "PAPERCLIP_ACTIONS_DISABLED");
@@ -719,7 +756,7 @@ export async function execute(context: AdapterExecutionContext): Promise<Adapter
       const delegation = wantsDelegation(request);
       return await finish(
         `Paperclip agent lookup failed: ${String(actions[0].error)}. No task was created.`,
-        "failed", delegation ? "PAPERCLIP_DELEGATION_FAILED" : "PAPERCLIP_CONTEXT_FAILED",
+        "failed", typeof actions[0].errorCode === "string" ? actions[0].errorCode : delegation ? "PAPERCLIP_DELEGATION_FAILED" : "PAPERCLIP_CONTEXT_FAILED",
       );
     }
     if (paperclipActions.promptAddon) prompt = [prompt, "---", paperclipActions.promptAddon].join("\n\n");
@@ -728,6 +765,9 @@ export async function execute(context: AdapterExecutionContext): Promise<Adapter
     const delegatedIssue = await maybeCreateDelegatedIssue(context, config, request, paperclipActions.agents, secrets, clients);
     if (delegatedIssue) {
       actions.push(delegatedIssue.action);
+      control.check();
+      const stopCode = executionErrorCode(delegatedIssue.action.errorCode);
+      if (stopCode) throw new ExecutionError(stopCode);
       await meta({
         adapterType: type,
         command: "paperclip-delegate-issue",
@@ -763,6 +803,13 @@ export async function execute(context: AdapterExecutionContext): Promise<Adapter
     usage = extractUsage(response.data);
     return await finish(readResponseText(response.data), "response_received");
   } catch (error) {
+    let stoppedBeforeSetup = false;
+    try { stoppedBeforeSetup = !control && context.signal?.aborted === true; } catch { /* malformed host signal */ }
+    const interruption = control?.error ?? (stoppedBeforeSetup ? new ExecutionError("cancelled") : executionError(error));
+    if (interruption) {
+      // Preserve receipts, but never wait for more logging/metadata after a stop.
+      return stoppedResult(interruption);
+    }
     const status = errorHttpStatus(error);
     let invalidConfiguration = false;
     try { invalidConfiguration = error instanceof ConfigurationError; } catch { /* hostile error object */ }
@@ -771,6 +818,9 @@ export async function execute(context: AdapterExecutionContext): Promise<Adapter
     const text = describeError(error, secrets);
     // Logging failure must not erase the structured failure (or receipts of earlier writes).
     try { await log("stderr", `Adapter error [${errorCode}]: ${text}`); } catch { /* result remains authoritative */ }
+    if (control?.error) return stoppedResult(control.error);
     return executionResult(context, config ?? unconfigured, text, "failed", actions, usage, errorCode);
+  } finally {
+    control?.dispose();
   }
 }

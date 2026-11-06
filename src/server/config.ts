@@ -11,6 +11,9 @@ export interface OllamaConfig {
   paperclipBaseUrl: string;
   autoMarkDone: boolean;
   enablePaperclipActions: boolean;
+  modelRequestTimeoutMs: number;
+  paperclipRequestTimeoutMs: number;
+  executionTimeoutMs: number;
   runtimeSkills: PaperclipRuntimeSkill[];
 }
 
@@ -67,6 +70,12 @@ function booleanValue(value: unknown, field: string): boolean {
     if (["0", "false", "no", "off"].includes(value.trim().toLowerCase())) return false;
   }
   throw new ConfigurationError(field);
+}
+
+function timeoutValue(value: unknown, field: string): number {
+  const parsed = numberValue(value, field);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 86_400_000) throw new ConfigurationError(field);
+  return parsed;
 }
 
 export function validateBearerCredential(value: unknown, field: string): string | undefined {
@@ -145,6 +154,12 @@ export function readOllamaConfig(config: Record<string, unknown> = {}, taskOverr
   }
   const rawApiKey = choose(["API_KEY", "apiKey"], "ollama");
   const apiKey = validateBearerCredential(rawApiKey, "API_KEY") ?? "";
+  let executionTimeoutMs = timeoutValue(choose(["EXECUTION_TIMEOUT_MS", "executionTimeoutMs"], 300_000), "EXECUTION_TIMEOUT_MS");
+  // timeoutSec is the official adapter configuration setting, not a context
+  // deadline contract. A positive trusted value caps our bounded run budget.
+  const hostSeconds = numberValue(choose(["TIMEOUT_SEC", "timeoutSec"], 0), "timeoutSec");
+  if (hostSeconds < 0 || hostSeconds > 86_400 || !Number.isSafeInteger(hostSeconds * 1000)) throw new ConfigurationError("timeoutSec");
+  if (hostSeconds > 0) executionTimeoutMs = Math.min(executionTimeoutMs, hostSeconds * 1000);
   return {
     baseUrl: validateEndpoint(choose(["BASE_URL", "baseUrl"], "http://localhost:11434/v1"), "BASE_URL"),
     apiKey,
@@ -157,6 +172,9 @@ export function readOllamaConfig(config: Record<string, unknown> = {}, taskOverr
     paperclipBaseUrl: validateEndpoint(choose(["PAPERCLIP_BASE_URL", "paperclipBaseUrl"], runtimeApiUrl()), "PAPERCLIP_BASE_URL"),
     autoMarkDone: booleanValue(choose(["AUTO_MARK_DONE", "autoMarkDone"], false), "AUTO_MARK_DONE"),
     enablePaperclipActions: booleanValue(choose(["ENABLE_PAPERCLIP_ACTIONS", "enablePaperclipActions"], true), "ENABLE_PAPERCLIP_ACTIONS"),
+    modelRequestTimeoutMs: timeoutValue(choose(["MODEL_REQUEST_TIMEOUT_MS", "modelRequestTimeoutMs"], 120_000), "MODEL_REQUEST_TIMEOUT_MS"),
+    paperclipRequestTimeoutMs: timeoutValue(choose(["PAPERCLIP_REQUEST_TIMEOUT_MS", "paperclipRequestTimeoutMs"], 30_000), "PAPERCLIP_REQUEST_TIMEOUT_MS"),
+    executionTimeoutMs,
     runtimeSkills: readRuntimeSkills(config),
   };
 }

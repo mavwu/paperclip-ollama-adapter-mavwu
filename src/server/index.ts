@@ -42,6 +42,22 @@ function getConfigSchema(): AdapterConfigSchema {
         default: 2048,
       },
       {
+        key: "MODEL_REQUEST_TIMEOUT_MS", label: "Model request deadline (ms)", type: "number",
+        hint: "Positive integer, at most 86400000. Omit for 120000 ms. Task options cannot override this deadline.",
+      },
+      {
+        key: "PAPERCLIP_REQUEST_TIMEOUT_MS", label: "Paperclip request deadline (ms)", type: "number",
+        hint: "Positive integer, at most 86400000. Omit for 30000 ms. Optional lookup timeouts do not prevent general inference.",
+      },
+      {
+        key: "EXECUTION_TIMEOUT_MS", label: "Overall execution deadline (ms)", type: "number",
+        hint: "Positive integer, at most 86400000. Omit for 300000 ms. Covers all requests and gates additional work.",
+      },
+      {
+        key: "timeoutSec", label: "Host timeout cap (seconds)", type: "number",
+        hint: "Optional trusted cap on the overall budget. Zero leaves the adapter's bounded deadline active.",
+      },
+      {
         key: "SYSTEM_PROMPT",
         label: "System Prompt",
         type: "textarea",

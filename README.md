@@ -24,6 +24,8 @@ Results distinguish:
 | `response_received` | Usable model text was returned; no task-completion claim. |
 | `delegated` | Paperclip returned an issue ID for the follow-up; its execution is separate. |
 | `failed` | Inference or a required organizational operation could not be confirmed. |
+| `cancelled` | Host cancellation stopped the run; prior action receipts remain available. |
+| `timed_out` | A required request or overall budget expired; prior action receipts remain available. |
 
 `resultJson.success` and `exitCode` describe adapter execution. `workflowCompleted` remains `false`. Failed required actions return `success: false`, a nonzero exit code, an error code and action details. Optional enrichment can fail while valid inference succeeds; that lookup is still recorded with `success: false` and `required: false`. Empty, truncated, refused, reasoning-only and unsupported tool-call responses fail instead of being treated as finished work.
 
@@ -45,6 +47,8 @@ ENABLE_PAPERCLIP_ACTIONS=true
 `SYSTEM_PROMPT` is optional. Config supports uppercase and camelCase aliases, such as `MODEL`/`model`. Explicit config wins over host-resolved `config.env`, then process environment, then defaults. Task options can override only temperature and token limits. See [CONFIGURATION.md](CONFIGURATION.md) for the exact contract, alias policy, result semantics and limitations.
 
 Omit `API_KEY` to use Ollama's public `ollama` placeholder without redacting normal occurrences of that word. Every explicitly supplied key is treated as a secret, including an explicit `API_KEY=ollama`. Credentials must contain only visible ASCII without whitespace; invalid values fail before any request rather than being trimmed or rewritten. An explicit empty key disables model authorization.
+
+Model requests default to a 120-second deadline, Paperclip requests to 30 seconds, and the overall run budget to 300 seconds. Configure `MODEL_REQUEST_TIMEOUT_MS`, `PAPERCLIP_REQUEST_TIMEOUT_MS`, and `EXECUTION_TIMEOUT_MS` through trusted configuration/environment; task options cannot override them. Positive trusted `timeoutSec` additionally caps the overall budget. All milliseconds settings must be positive integers at most 86400000; zero cannot disable a deadline. See [CONFIGURATION.md](CONFIGURATION.md) for aliases, lifecycle ordering and outcome semantics.
 
 Omit `PAPERCLIP_BASE_URL` to use the host runtime URL; set it explicitly only for a trusted destination override. Both service URLs are validated before inference or company lookup. HTTP is allowed only for loopback (`localhost`, `127.0.0.0/8`, `[::1]`); remote services require HTTPS. Embedded credentials, query strings, fragments and malformed values fail configuration with zero outbound requests. All redirects, including same-origin redirects, are rejected. The clients do not inherit Axios credentials, headers, interceptors or proxies; proxy environment variables are intentionally not used. Configure a direct HTTPS endpoint or trusted gateway where needed.
 
@@ -102,7 +106,9 @@ No new runtime dependencies are needed for the regression suite.
 
 Regex intent detection and JSON delegation planning remain limited; they are not an authorization model. Only exact normalized names/titles/roles are matched. A unique exact name takes precedence; otherwise multiple role/title matches are rejected. Eligible states are `idle`, `active` and `running`; self-assignment, missing/unknown states and other statuses are rejected. Paperclip remains responsible for final permissions and scheduling.
 
-There is no request deadline/cancellation support, replay-safe task creation, full skill/session integration or autonomous execution loop yet. A creation request can persist before a transport failure. The adapter does not retry it, but host recovery policies or operator retries can start another execution. Do not blindly repeat an uncertain action without checking Paperclip state.
+There is no replay-safe task creation, full skill/session integration or autonomous execution loop yet. Cooperative host cancellation is supported only when the host supplies the official optional lifecycle fields; the installed adapter-utils types predate those fields. HTTP cancellation aborts local requests but does not prove remote model computation stopped or an issue creation was rolled back. Receipts remain available after cancellation or timeout. The adapter does not retry writes, but host recovery policies or operator retries can start another execution. Do not blindly repeat an uncertain action without checking Paperclip state.
+
+Deadlines bound HTTP work and prevent subsequent requests. They are cooperative: host callbacks and transports are awaited until they settle, and JavaScript blocking the event loop cannot be forcibly preempted. The adapter does not claim remote-stop verification, run independent checkout, or opt uncertain writes into recovery/replay. Explicit ask/planning/skill-test or unknown work modes block delegation writes; missing legacy work-mode context preserves existing explicit delegation behavior under Paperclip's authorization.
 
 ## Troubleshooting
 

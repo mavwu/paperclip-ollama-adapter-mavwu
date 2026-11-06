@@ -36,6 +36,9 @@ Use for text inference and explicit follow-up task creation. This adapter does n
 - MODEL: Any Ollama model name. Defaults to qwen2.5-coder:1.5b
 - TEMPERATURE: Sampling temperature. Defaults to 0.7
 - MAX_TOKENS: Maximum output tokens. Defaults to 2048
+- MODEL_REQUEST_TIMEOUT_MS: Positive integer request budget, defaults to 120000 ms; maximum 86400000.
+- PAPERCLIP_REQUEST_TIMEOUT_MS: Positive integer request budget, defaults to 30000 ms; maximum 86400000.
+- EXECUTION_TIMEOUT_MS: Positive integer overall run budget, defaults to 300000 ms; maximum 86400000. A positive trusted TIMEOUT_SEC/timeoutSec additionally caps this budget; zero does not disable it.
 - SYSTEM_PROMPT: Optional system prompt prepended to each request.
 - AUTO_MARK_DONE: Deprecated compatibility setting; defaults to false. Issues are never automatically marked done, even when true, because completion is unverified.
 - PAPERCLIP_BASE_URL: Optional trusted Paperclip API override for agent lookup and follow-up task creation. Otherwise uses host PAPERCLIP_API_URL, then PAPERCLIP_RUNTIME_API_URL, then host/listen-port derivation (localhost:3100 by default).
@@ -47,11 +50,17 @@ The same values can be provided through adapter config using either uppercase ke
 
 Precedence is explicit adapter config, then its host-resolved env object, then process environment, then defaults. Uppercase aliases win conflicts within each layer. Reserved env.PAPERCLIP_API_URL and env.PAPERCLIP_API_KEY cannot replace host runtime URL or context.authToken. Only TEMPERATURE/temperature and MAX_TOKENS/maxTokens may be overridden by task options. Both service clients reject all redirects and ignore ambient Axios authentication/proxy defaults.
 
+When the host supplies the official optional signal/onCancellationReady/onDispatch fields, the adapter registers cancellation readiness before provider work and reports dispatch immediately before its first HTTP request. Older hosts may omit these fields. Cancellation aborts local HTTP work, not verified remote computation or persisted writes. Action receipts distinguish confirmed, rejected, unknown, and not-attempted persistence. Unknown writes must be inspected before retrying. No automatic retries, independent checkout or completion writes are performed. Explicit non-standard work modes do not permit delegation writes. Host callbacks and transports must cooperate and settle; deadlines prevent additional work but cannot forcibly preempt arbitrary host JavaScript.
+
 - BASE_URL or baseUrl
 - API_KEY or apiKey
 - MODEL or model
 - TEMPERATURE or temperature
 - MAX_TOKENS or maxTokens
+- MODEL_REQUEST_TIMEOUT_MS or modelRequestTimeoutMs
+- PAPERCLIP_REQUEST_TIMEOUT_MS or paperclipRequestTimeoutMs
+- EXECUTION_TIMEOUT_MS or executionTimeoutMs
+- TIMEOUT_SEC or timeoutSec (optional seconds cap)
 - SYSTEM_PROMPT or systemPrompt
 - AUTO_MARK_DONE or autoMarkDone
 - PAPERCLIP_BASE_URL or paperclipBaseUrl
