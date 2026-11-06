@@ -78,6 +78,11 @@ function getConfigSchema(): AdapterConfigSchema {
         hint: "Allow the adapter to inspect agents and create assigned follow-up tasks when asked.",
       },
       {
+        key: "DELEGATION_STORAGE", label: "Delegation safety storage", type: "select",
+        options: [{ label: "Disabled (default)", value: "disabled" }, { label: "Verified Paperclip documents v1", value: "paperclip_documents_v1" }],
+        hint: "Enable only after verifying the server contract and reconciling earlier delegations. Reserves one durable action per source issue; unresolved actions require review.",
+      },
+      {
         key: "PAPERCLIP_BASE_URL",
         label: "Paperclip Base URL",
         type: "text",

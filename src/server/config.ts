@@ -14,6 +14,7 @@ export interface OllamaConfig {
   modelRequestTimeoutMs: number;
   paperclipRequestTimeoutMs: number;
   executionTimeoutMs: number;
+  delegationStorage: "disabled" | "paperclip_documents_v1";
   runtimeSkills: PaperclipRuntimeSkill[];
 }
 
@@ -154,6 +155,8 @@ export function readOllamaConfig(config: Record<string, unknown> = {}, taskOverr
   }
   const rawApiKey = choose(["API_KEY", "apiKey"], "ollama");
   const apiKey = validateBearerCredential(rawApiKey, "API_KEY") ?? "";
+  const delegationStorage = choose(["DELEGATION_STORAGE", "delegationStorage"], "disabled");
+  if (delegationStorage !== "disabled" && delegationStorage !== "paperclip_documents_v1") throw new ConfigurationError("DELEGATION_STORAGE");
   let executionTimeoutMs = timeoutValue(choose(["EXECUTION_TIMEOUT_MS", "executionTimeoutMs"], 300_000), "EXECUTION_TIMEOUT_MS");
   // timeoutSec is the official adapter configuration setting, not a context
   // deadline contract. A positive trusted value caps our bounded run budget.
@@ -175,6 +178,7 @@ export function readOllamaConfig(config: Record<string, unknown> = {}, taskOverr
     modelRequestTimeoutMs: timeoutValue(choose(["MODEL_REQUEST_TIMEOUT_MS", "modelRequestTimeoutMs"], 120_000), "MODEL_REQUEST_TIMEOUT_MS"),
     paperclipRequestTimeoutMs: timeoutValue(choose(["PAPERCLIP_REQUEST_TIMEOUT_MS", "paperclipRequestTimeoutMs"], 30_000), "PAPERCLIP_REQUEST_TIMEOUT_MS"),
     executionTimeoutMs,
+    delegationStorage,
     runtimeSkills: readRuntimeSkills(config),
   };
 }

@@ -1,3 +1,4 @@
+import { delegationFixture } from "./helpers/delegation.mjs";
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import axios from "axios";
@@ -7,21 +8,22 @@ import { testEnvironment } from "../dist/server/test.js";
 
 const envKeys = ["BASE_URL", "baseUrl", "API_KEY", "apiKey", "MODEL", "model", "TEMPERATURE", "temperature", "MAX_TOKENS", "maxTokens", "SYSTEM_PROMPT", "systemPrompt", "AUTO_MARK_DONE", "autoMarkDone", "ENABLE_PAPERCLIP_ACTIONS", "enablePaperclipActions", "PAPERCLIP_BASE_URL", "paperclipBaseUrl", "PAPERCLIP_API_URL", "PAPERCLIP_RUNTIME_API_URL", "PAPERCLIP_API_KEY", "PAPERCLIP_LISTEN_HOST", "PAPERCLIP_LISTEN_PORT", "HOST", "PORT"];
 const transport = axios.defaults.adapter;
-let previousEnv, calls, respond;
+let previousEnv, calls, respond, journalFixture;
 const chat = content => ({ choices: [{ message: { content }, finish_reason: "stop" }] });
 const agents = [{ id: "cto", name: "Alex", role: "cto", status: "idle" }];
 const plan = chat('{"shouldDelegate":true,"assigneeName":"CTO","title":"Review","description":"Review design"}');
 beforeEach(() => {
   previousEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
   for (const key of envKeys) delete process.env[key];
-  calls = [];
+  calls = []; journalFixture = delegationFixture({ company: "company", source: "issue" });
   respond = () => chat("General answer");
   axios.defaults.adapter = async config => {
+    const auxiliary = journalFixture.auxiliary(config); if (auxiliary) return auxiliary;
     const call = { method: config.method, url: config.url, headers: config.headers.toJSON(), auth: config.auth, proxy: config.proxy,
       rejectUnauthorized: config.httpsAgent?.options.rejectUnauthorized,
       maxRedirects: config.maxRedirects, data: typeof config.data === "string" ? JSON.parse(config.data) : config.data };
     calls.push(call);
-    const result = await respond(call);
+    const result = await respond(call); journalFixture.observe(config, result?.data ?? result);
     return { status: 200, statusText: "OK", headers: {}, config, ...result, data: result?.data ?? result };
   };
 });
@@ -34,7 +36,7 @@ afterEach(() => {
 function run(prompt = "Explain addition", config = {}, wake = {}) {
   return { runId: "boundary-run", agent: { id: "ceo", companyId: "company", name: "CEO", adapterType: "ollama_local", adapterConfig: {} },
     runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: "issue" },
-    config: { BASE_URL: "https://model.invalid/v1", PAPERCLIP_BASE_URL: "https://paperclip.invalid", API_KEY: "model-secret", MODEL: "trusted-model", ...config },
+    config: { DELEGATION_STORAGE: "paperclip_documents_v1", BASE_URL: "https://model.invalid/v1", PAPERCLIP_BASE_URL: "https://paperclip.invalid", API_KEY: "model-secret", MODEL: "trusted-model", ...config },
     context: { issueId: "issue", prompt, ...wake }, authToken: "run-secret", onLog: async () => {} };
 }
 function delegation() {

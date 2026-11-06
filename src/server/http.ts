@@ -27,7 +27,7 @@ export class WriteRequestError extends Error {
   readonly persistence: "not_attempted" | "rejected" | "unknown";
   constructor(error: unknown, readonly attempted: boolean, readonly interruption?: ExecutionError) {
     const message = own(error, "message");
-    super(interruption?.message ?? (typeof message === "string" ? message : "Paperclip issue creation failed; inspect state before retrying."));
+    super(interruption?.message ?? (typeof message === "string" ? message : "Paperclip write failed; inspect state before retrying."));
     const status = errorHttpStatus(error);
     if (status !== undefined) this.response = { status, data: own(own(error, "response"), "data") };
     // A timeout, 5xx or redirect is not evidence that the origin did not commit.
@@ -42,7 +42,7 @@ function parseData(data: unknown): unknown {
 
 // Each instance owns its origin and credential. Callers cannot supply arbitrary
 // URLs, headers, auth, proxies, or transport options through a task/model body.
-function service(base: string, token: string | undefined, timeout: number, timeoutCode: "MODEL_REQUEST_TIMEOUT" | "PAPERCLIP_REQUEST_TIMEOUT", control?: ExecutionControl) {
+function service(base: string, token: string | undefined, timeout: number, timeoutCode: "MODEL_REQUEST_TIMEOUT" | "PAPERCLIP_REQUEST_TIMEOUT", control?: ExecutionControl, runId?: string) {
   // Construct from explicit defaults instead of inheriting ambient Axios auth,
   // headers, params, interceptors or proxy configuration. Keep the mock transport
   // seam used by deterministic tests; production always uses Node's HTTP adapter.
@@ -60,7 +60,7 @@ function service(base: string, token: string | undefined, timeout: number, timeo
     transformRequest: [data => data === undefined ? undefined : JSON.stringify(data)],
     transformResponse: [parseData],
   });
-  return async (method: "GET" | "POST", route: string, body?: unknown, write = false): Promise<ServiceResponse> => {
+  return async (method: "GET" | "POST" | "PUT", route: string, body?: unknown, write = false): Promise<ServiceResponse> => {
     const url = `${base}${route}`;
     // Fixed adapter-owned routes must never resolve outside the configured origin.
     if (!route.startsWith("/") || route.startsWith("//") || new URL(url).origin !== new URL(base).origin) throw new ConfigurationError("request destination");
@@ -86,7 +86,7 @@ function service(base: string, token: string | undefined, timeout: number, timeo
         // Capture observed write responses before Axios checks cancellation again.
         // A later stop must not erase an already received authoritative receipt.
         adapter: async config => { const response = await transport(config); received = response; return response; },
-        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(runId ? { "X-Paperclip-Run-Id": runId } : {}) },
       });
       if (write) return observedWrite(response);
       request.check();
@@ -102,14 +102,14 @@ function service(base: string, token: string | undefined, timeout: number, timeo
   };
 }
 
-export function createServiceClients(config: OllamaConfig, authToken?: string, probeTimeout?: number, control?: ExecutionControl) {
+export function createServiceClients(config: OllamaConfig, authToken?: string, probeTimeout?: number, control?: ExecutionControl, runId?: string) {
   // Validate both destinations and credentials before constructing any request.
   const modelBase = validateEndpoint(config.baseUrl, "BASE_URL");
   const paperclipBase = validateEndpoint(config.paperclipBaseUrl, "PAPERCLIP_BASE_URL");
   const modelKey = validateBearerCredential(config.apiKey, "API_KEY");
   const runToken = validateBearerCredential(authToken, "run authentication");
   const model = service(modelBase, modelKey, Math.min(config.modelRequestTimeoutMs, probeTimeout ?? config.modelRequestTimeoutMs), "MODEL_REQUEST_TIMEOUT", control);
-  const paperclip = service(paperclipBase, runToken, config.paperclipRequestTimeoutMs, "PAPERCLIP_REQUEST_TIMEOUT", control);
+  const paperclip = service(paperclipBase, runToken, config.paperclipRequestTimeoutMs, "PAPERCLIP_REQUEST_TIMEOUT", control, validateBearerCredential(runId, "run identity"));
   function requireRunToken() {
     if (!runToken) throw new Error("missing_auth_token");
   }
@@ -117,6 +117,16 @@ export function createServiceClients(config: OllamaConfig, authToken?: string, p
     complete(body: unknown) { return model("POST", "/chat/completions", body); },
     listAgents(companyId: string) { requireRunToken(); return paperclip("GET", `/api/companies/${encodeURIComponent(companyId)}/agents`); },
     createIssue(companyId: string, body: unknown) { requireRunToken(); return paperclip("POST", `/api/companies/${encodeURIComponent(companyId)}/issues`, body, true); },
+    getIssue(issueId: string) { requireRunToken(); return paperclip("GET", `/api/issues/${encodeURIComponent(issueId)}`); },
+    getSelf() { requireRunToken(); return paperclip("GET", "/api/agents/me"); },
+    getRun(runId: string) { requireRunToken(); return paperclip("GET", `/api/heartbeat-runs/${encodeURIComponent(runId)}`); },
+    getDocument(issueId: string, key: string) { requireRunToken(); return paperclip("GET", `/api/issues/${encodeURIComponent(issueId)}/documents/${encodeURIComponent(key)}`); },
+    createDocument(issueId: string, key: string, body: string) {
+      requireRunToken();
+      return paperclip("PUT", `/api/issues/${encodeURIComponent(issueId)}/documents/${encodeURIComponent(key)}`, {
+        format: "markdown", title: "Ollama delegation safety record", body, baseRevisionId: null,
+      }, true);
+    },
   };
 }
 

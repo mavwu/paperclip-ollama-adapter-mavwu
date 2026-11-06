@@ -13,6 +13,8 @@ import { WriteRequestError } from "./http.js";
 import { ExecutionControl, ExecutionError, executionError, executionErrorCode } from "./lifecycle.js";
 import type { LifecycleContext } from "./lifecycle.js";
 import { performance } from "node:perf_hooks";
+import { openDelegation, readCreationMetadata } from "./delegation.js";
+import type { DelegationJournal } from "./delegation.js";
 import { ModelResponseError, readResponseText } from "./response.js";
 import { collectDiagnosticSecrets, describeError, errorHttpStatus, redactInvocation, redactKnownSecrets, sanitizeDiagnosticText } from "./diagnostics.js";
 
@@ -523,54 +525,58 @@ async function createDelegatedIssue(
   assignee: PaperclipAgentSummary,
   decision: DelegationDecision,
   secrets: readonly string[],
+  journal: DelegationJournal,
 ): Promise<JsonObject> {
   const companyId = readCompanyId(context);
-  const parentId = readIssueId(context);
   if (!companyId) return { attempted: false, success: false, reason: "missing_company_id" };
   if (!context.authToken) return { attempted: false, success: false, reason: "missing_auth_token" };
   if (!validReceiptId(assignee.id, secrets)) return { attempted: false, success: false, reason: "invalid_assignee_id", error: "The selected agent did not supply a safe scalar ID. No task was created." };
 
   try {
+    const reserved = await journal.reserve(
+      decision.title ?? `Follow up: ${assignee.name}`,
+      decision.description ?? decision.reason ?? "Follow-up task delegated by the current Paperclip agent.", assignee.id);
+    if (!reserved.payload) return reserved.action!;
     const response = await clients.createIssue(
       companyId,
-      {
-        title: decision.title ?? `Follow up: ${assignee.name}`,
-        description: decision.description ?? decision.reason ?? "Follow-up task delegated by the current Paperclip agent.",
-        status: "todo",
-        parentId,
-        assigneeAgentId: assignee.id,
-      },
+      reserved.payload,
     );
     const interrupted = response.interruption ? { errorCode: response.interruption.code } : {};
+    const creation = readCreationMetadata(response.status, response.data);
 
     // Required identity is an opaque, nonblank scalar, never arbitrary JSON.
     // Do not normalize IDs or copy unvalidated optional provider fields.
-    if (!isRecord(response.data) || !validReceiptId(response.data.id, secrets)) {
+    if (!isRecord(response.data) || !validReceiptId(response.data.id, secrets) || response.data.id === readIssueId(context)) {
       return { attempted: true, success: false, persistence: "unknown", ...interrupted, reason: "invalid_issue_receipt", error: "Paperclip returned no safe scalar issue ID; creation outcome is unverified. Do not retry blindly." };
     }
     // Legacy receipts may omit the assignment echo. Any supplied value must be
     // a matching string; null, objects and mismatches cannot confirm assignment.
     if (response.data.assigneeAgentId !== undefined &&
         (typeof response.data.assigneeAgentId !== "string" || response.data.assigneeAgentId !== assignee.id)) {
-      return {
-        attempted: true, success: false, persistence: "confirmed", ...interrupted, issueId: response.data.id, reason: "assignment_not_verified",
+      return await journal.record({
+        attempted: true, success: false, persistence: "confirmed", ...interrupted, ...(creation ?? { creationOutcome: "unknown" }), issueId: response.data.id, reason: "assignment_not_verified",
         error: "The returned issue is not assigned to the requested agent. Check Paperclip state before retrying.",
-      };
+      });
+    }
+    if (!creation) {
+      return await journal.record({ attempted: true, success: false, persistence: "confirmed", ...interrupted, issueId: response.data.id,
+        creationOutcome: "unknown", reason: "invalid_creation_metadata", error: "Paperclip returned malformed or contradictory creation diagnostics. Inspect the returned issue before retrying." });
     }
     const rawIdentifier = response.data.identifier;
     const identifier = typeof rawIdentifier === "string" && rawIdentifier.trim() && rawIdentifier.length <= 512 &&
       !/[<>\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/.test(rawIdentifier)
       ? redactKnownSecrets(rawIdentifier.trim(), secrets) : null;
-    return {
+    return await journal.record({
       attempted: true,
       success: true,
       persistence: "confirmed",
+      ...creation,
       ...interrupted,
       issueId: response.data.id,
       identifier,
       assigneeAgentId: assignee.id,
       assigneeName: redactKnownSecrets(assignee.name, secrets),
-    };
+    });
   } catch (error) {
     const writeFailure = error instanceof WriteRequestError ? error : undefined;
     const interruption = writeFailure?.interruption ?? executionError(error);
@@ -594,8 +600,10 @@ async function maybeCreateDelegatedIssue(
   agents: PaperclipAgentSummary[],
   secrets: readonly string[],
   clients: ServiceClients,
+  journal?: DelegationJournal,
 ): Promise<{ text: string; action: JsonObject } | null> {
   if (!config.enablePaperclipActions || !wantsDelegation(prompt)) return null;
+  if (!journal) throw new Error("Delegation requires a verified durable reservation boundary.");
   if (agents.length === 0) {
     return { text: "I could not delegate because no visible agents were available.", action: { type: "delegate_issue", attempted: false, success: false, reason: "no_visible_agents" } };
   }
@@ -635,12 +643,12 @@ async function maybeCreateDelegatedIssue(
     };
   }
 
-  const action = await createDelegatedIssue(context, clients, assignee, decision, secrets);
+  const action = await createDelegatedIssue(context, clients, assignee, decision, secrets, journal);
   if (action.success === true) {
     const identifier = typeof action.identifier === "string" ? ` (${action.identifier})` : "";
     const title = decision.title ? `: ${decision.title}` : "";
     return {
-      text: `Created a follow-up task for ${assignee.name}${identifier}${title}.`,
+      text: `${action.creationOutcome === "created" ? "Created a follow-up task" : action.creationOutcome === "reused" ? "Reused existing follow-up task" : "Confirmed a follow-up task"} for ${assignee.name}${identifier}${title}.`,
       action: { type: "delegate_issue", ...action },
     };
   }
@@ -736,7 +744,7 @@ export async function execute(context: LifecycleContext): Promise<AdapterExecuti
     control = new ExecutionControl(context, config.executionTimeoutMs, startedAt);
     // Secrets come from supplied config/environment/token values above. The
     // implicit public "ollama" placeholder is not a secret; explicit keys are.
-    const clients = createServiceClients(config, context.authToken, undefined, control);
+    const clients = createServiceClients(config, context.authToken, undefined, control, context.runId);
     await control.ready();
     let prompt = extractPrompt(context);
     const required = requiresCompanyContext(request) || wantsDelegation(request);
@@ -750,6 +758,21 @@ export async function execute(context: LifecycleContext): Promise<AdapterExecuti
       actions.push({ type: wantsDelegation(request) ? "delegate_issue" : "fetch_agents", attempted: false, success: false, required: true, reason: "actions_disabled" });
       return await finish("The requested organizational operation requires Paperclip actions, which are disabled. No action was performed.", "failed", "PAPERCLIP_ACTIONS_DISABLED");
     }
+    let journal: DelegationJournal | undefined;
+    if (wantsDelegation(request)) {
+      const opened = await openDelegation({ storage: config.delegationStorage, companyId: readCompanyId(context), sourceIssueId: readIssueId(context),
+        agentId: context.agent.id, runId: context.runId, request, serviceIdentity: config.paperclipBaseUrl }, clients, secrets, control);
+      journal = opened.journal;
+      if (opened.action) {
+        actions.push(opened.action);
+        control.check();
+        const stopCode = executionErrorCode(opened.action.errorCode);
+        if (stopCode) throw new ExecutionError(stopCode);
+        return await finish(opened.action.success === true ? "Verified the existing delegated task. No new issue was created." :
+          "Delegation requires review: the source ownership or durable action record could not authorize a new creation. No issue-creation request was started.",
+        opened.action.success === true ? "delegated" : "failed", opened.action.success === true ? undefined : "PAPERCLIP_DELEGATION_BLOCKED");
+      }
+    }
     const paperclipActions = await preparePaperclipActionContext(context, config, request, secrets, clients);
     actions.push(...paperclipActions.actions);
     if (actions.some(action => action.success === false && action.required === true)) {
@@ -762,7 +785,7 @@ export async function execute(context: LifecycleContext): Promise<AdapterExecuti
     if (paperclipActions.promptAddon) prompt = [prompt, "---", paperclipActions.promptAddon].join("\n\n");
 
     // Only the original source request is used for action detection and planning.
-    const delegatedIssue = await maybeCreateDelegatedIssue(context, config, request, paperclipActions.agents, secrets, clients);
+    const delegatedIssue = await maybeCreateDelegatedIssue(context, config, request, paperclipActions.agents, secrets, clients, journal);
     if (delegatedIssue) {
       actions.push(delegatedIssue.action);
       control.check();

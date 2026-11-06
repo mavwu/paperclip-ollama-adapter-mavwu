@@ -39,6 +39,7 @@ Use for text inference and explicit follow-up task creation. This adapter does n
 - MODEL_REQUEST_TIMEOUT_MS: Positive integer request budget, defaults to 120000 ms; maximum 86400000.
 - PAPERCLIP_REQUEST_TIMEOUT_MS: Positive integer request budget, defaults to 30000 ms; maximum 86400000.
 - EXECUTION_TIMEOUT_MS: Positive integer overall run budget, defaults to 300000 ms; maximum 86400000. A positive trusted TIMEOUT_SEC/timeoutSec additionally caps this budget; zero does not disable it.
+- DELEGATION_STORAGE: disabled by default. Set paperclip_documents_v1 only on a verified compatible host after reconciling earlier delegations. Source-issue documents reserve one action and its receipt; uncertain actions are never automatically replayed. Authenticated ownership and a running issue-scoped run are required.
 - SYSTEM_PROMPT: Optional system prompt prepended to each request.
 - AUTO_MARK_DONE: Deprecated compatibility setting; defaults to false. Issues are never automatically marked done, even when true, because completion is unverified.
 - PAPERCLIP_BASE_URL: Optional trusted Paperclip API override for agent lookup and follow-up task creation. Otherwise uses host PAPERCLIP_API_URL, then PAPERCLIP_RUNTIME_API_URL, then host/listen-port derivation (localhost:3100 by default).
@@ -61,6 +62,7 @@ When the host supplies the official optional signal/onCancellationReady/onDispat
 - PAPERCLIP_REQUEST_TIMEOUT_MS or paperclipRequestTimeoutMs
 - EXECUTION_TIMEOUT_MS or executionTimeoutMs
 - TIMEOUT_SEC or timeoutSec (optional seconds cap)
+- DELEGATION_STORAGE or delegationStorage
 - SYSTEM_PROMPT or systemPrompt
 - AUTO_MARK_DONE or autoMarkDone
 - PAPERCLIP_BASE_URL or paperclipBaseUrl

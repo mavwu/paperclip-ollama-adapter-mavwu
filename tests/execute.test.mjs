@@ -1,3 +1,4 @@
+import { delegationFixture } from "./helpers/delegation.mjs";
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import axios from "axios";
@@ -7,20 +8,22 @@ import { testEnvironment } from "../dist/server/test.js";
 import * as entry from "../dist/index.js";
 
 const originalTransport = axios.defaults.adapter;
-let calls;
+let calls, journalFixture;
 let respond;
 beforeEach(() => {
-  calls = [];
+  calls = []; journalFixture = delegationFixture({ company: "test-company", source: "test-issue" });
   respond = () => { throw new Error("Unexpected request; network disabled in tests"); };
   // All adapter HTTP requests use this in-memory transport; no real services are contacted.
   axios.defaults.adapter = async config => {
+    const auxiliary = journalFixture.auxiliary(config); if (auxiliary) return auxiliary;
     const call = {
       method: config.method, url: config.url,
       data: typeof config.data === "string" ? JSON.parse(config.data) : config.data,
       headers: config.headers.toJSON(),
     };
     calls.push(call);
-    return { status: 200, statusText: "OK", headers: {}, config, data: await respond(call) };
+    const data = await respond(call); journalFixture.observe(config, data);
+    return { status: 200, statusText: "OK", headers: {}, config, data };
   };
 });
 afterEach(() => { axios.defaults.adapter = originalTransport; });
@@ -39,7 +42,7 @@ function context(prompt = "Explain addition", config = {}, wake = {}) {
     agent: { id: "ceo", companyId: "test-company", name: "CEO", adapterType: "ollama_local", adapterConfig: {} },
     runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: "test-issue" },
     config: {
-      BASE_URL: "https://model.invalid/v1", PAPERCLIP_BASE_URL: "https://paperclip.invalid",
+      DELEGATION_STORAGE: "paperclip_documents_v1", BASE_URL: "https://model.invalid/v1", PAPERCLIP_BASE_URL: "https://paperclip.invalid",
       API_KEY: "fake-model-key", MODEL: "test-model", SYSTEM_PROMPT: "Test instructions",
       AUTO_MARK_DONE: false, ENABLE_PAPERCLIP_ACTIONS: true, ...config,
     },
@@ -167,7 +170,8 @@ test("successful delegation reports the persisted issue without completing paren
   assert.equal(result.resultJson.workflowCompleted, false);
   assert.equal(result.resultJson.actions.at(-1).issueId, "child");
   const created = calls.find(c => c.url.endsWith("/issues"));
-  assert.deepEqual(created.data, { title: "Review design", description: "Review the design", status: "todo", parentId: "test-issue", assigneeAgentId: "cto" });
+  assert.match(created.data.idempotencyKey, /^ollama-delegation-v1:[a-f0-9]{64}$/);
+  assert.deepEqual(created.data, { title: "Review design", description: "Review the design", status: "todo", parentId: "test-issue", assigneeAgentId: "cto", idempotencyKey: created.data.idempotencyKey });
   noCompletionWrites();
 });
 
@@ -375,7 +379,7 @@ for (const prompt of [
   test(`authenticated organizational request fails without token: ${prompt}`, async () => {
     const run = context(prompt);
     delete run.authToken;
-    failed(await execute(run), wantsDelegation(prompt) ? "PAPERCLIP_DELEGATION_FAILED" : "PAPERCLIP_CONTEXT_FAILED");
+    failed(await execute(run), wantsDelegation(prompt) ? "PAPERCLIP_DELEGATION_BLOCKED" : "PAPERCLIP_CONTEXT_FAILED");
     assert.equal(calls.length, 0);
   });
 }

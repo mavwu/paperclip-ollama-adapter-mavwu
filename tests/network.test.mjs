@@ -1,3 +1,4 @@
+import { delegationFixture } from "./helpers/delegation.mjs";
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import http from "node:http";
@@ -13,25 +14,28 @@ import { createServerAdapter } from "../dist/server/index.js";
 
 const envKeys = ["API_KEY", "apiKey", "BASE_URL", "baseUrl", "PAPERCLIP_BASE_URL", "paperclipBaseUrl", "PAPERCLIP_API_URL", "PAPERCLIP_RUNTIME_API_URL", "MODEL", "model", "TEMPERATURE", "temperature", "MAX_TOKENS", "maxTokens", "SYSTEM_PROMPT", "systemPrompt", "AUTO_MARK_DONE", "autoMarkDone", "ENABLE_PAPERCLIP_ACTIONS", "enablePaperclipActions", "HOST", "PORT", "PAPERCLIP_LISTEN_HOST", "PAPERCLIP_LISTEN_PORT"];
 const original = { http: http.request, https: https.request, adapter: axios.defaults.adapter };
-let savedEnv, calls, respond;
+let savedEnv, calls, respond, journalFixture;
 const chat = content => ({ choices: [{ message: { content }, finish_reason: "stop" }] });
 
 beforeEach(() => {
   savedEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
   for (const key of envKeys) delete process.env[key];
-  calls = [];
+  calls = []; journalFixture = delegationFixture();
   respond = () => ({ status: 200, data: chat("Run ollama pull llama3") });
   // Exercise the real Axios HTTP adapter and its header/body serialization.
   // Replace only Node's terminal transports; no DNS or socket is opened.
   axios.defaults.adapter = "http";
   const request = (options, callback) => {
-    const call = { options, body: "" }; calls.push(call);
+    const call = { options, body: "" };
+    const auxiliary = options.path.includes("/api/issues/") || options.path.endsWith("/api/agents/me") || options.path.includes("/api/heartbeat-runs/"); if (!auxiliary) calls.push(call);
     const req = new Writable({
       write(chunk, _encoding, done) { call.body += chunk.toString(); done(); },
       final(done) {
         done();
         queueMicrotask(() => {
-          const result = respond(call);
+          const prepared = { url: (options.protocol || "https:") + "//" + options.hostname + options.path, method: options.method.toLowerCase(), headers: options.headers, data: call.body || undefined };
+          const result = auxiliary ? journalFixture.auxiliary(prepared) : respond(call);
+          if (!auxiliary) journalFixture.observe(prepared, result.data);
           const res = Readable.from([JSON.stringify(result.data)]);
           res.statusCode = result.status;
           res.statusMessage = "Test fixture";
@@ -59,8 +63,8 @@ function invocation(config = {}, prompt = "Explain addition") {
   return {
     runId: "network-review", agent: { id: "ceo", companyId: "company", name: "CEO", adapterType: "ollama_local", adapterConfig: {} },
     runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: "issue" },
-    config: { BASE_URL: "http://localhost:11434/v1", PAPERCLIP_BASE_URL: "http://localhost:3100", ...config },
-    context: { prompt }, authToken: "run-secret", onLog: async () => {},
+    config: { DELEGATION_STORAGE: "paperclip_documents_v1", BASE_URL: "http://localhost:11434/v1", PAPERCLIP_BASE_URL: "http://localhost:3100", ...config },
+    context: { issueId: "issue", prompt }, authToken: "run-secret", onLog: async () => {},
   };
 }
 const authorization = call => call.options.headers.Authorization ?? call.options.headers.authorization;

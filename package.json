@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "npm run build && node --test tests/execute.test.mjs tests/boundaries.test.mjs tests/network.test.mjs tests/diagnostics.test.mjs tests/lifecycle.test.mjs",
+    "test": "npm run build && node --test tests/execute.test.mjs tests/boundaries.test.mjs tests/network.test.mjs tests/diagnostics.test.mjs tests/lifecycle.test.mjs tests/replay.test.mjs",
     "test:integration": "npm run build && node scripts/live-smoke.mjs",
     "prepublishOnly": "npm run build"
   },

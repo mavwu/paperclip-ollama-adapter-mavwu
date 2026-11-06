@@ -1,3 +1,4 @@
+import { delegationFixture } from "./helpers/delegation.mjs";
 import assert from "node:assert/strict";
 import { beforeEach, afterEach, test } from "node:test";
 import axios from "axios";
@@ -13,7 +14,7 @@ const originalAdapter = axios.defaults.adapter;
 const originalHttp = http.request, originalHttps = https.request;
 const timeoutKeys = ["MODEL_REQUEST_TIMEOUT_MS", "modelRequestTimeoutMs", "PAPERCLIP_REQUEST_TIMEOUT_MS", "paperclipRequestTimeoutMs", "EXECUTION_TIMEOUT_MS", "executionTimeoutMs", "TIMEOUT_SEC", "timeoutSec"];
 let savedTimeoutEnv;
-let calls, respond;
+let calls, respond, journalFixture;
 const chat = content => ({ choices: [{ message: { content }, finish_reason: "stop" }] });
 const agents = [{ id: "cto", name: "Alex", role: "cto", status: "idle" }];
 const plan = chat('{"shouldDelegate":true,"assigneeName":"CTO","title":"Review","description":"Review"}');
@@ -24,17 +25,18 @@ function enableTimers(t) {
 }
 function run(config = {}, prompt = "Explain addition") {
   return { runId: "lifecycle-run", agent: { id: "ceo", companyId: "company", name: "CEO", adapterType: "ollama_local", adapterConfig: {} }, runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: "issue" },
-    config: { BASE_URL: "https://model.invalid/v1", PAPERCLIP_BASE_URL: "https://paperclip.invalid", API_KEY: "model-secret", MODEL: "test-model", MODEL_REQUEST_TIMEOUT_MS: 1000, PAPERCLIP_REQUEST_TIMEOUT_MS: 500, EXECUTION_TIMEOUT_MS: 5000, ...config },
+    config: { DELEGATION_STORAGE: "paperclip_documents_v1", BASE_URL: "https://model.invalid/v1", PAPERCLIP_BASE_URL: "https://paperclip.invalid", API_KEY: "model-secret", MODEL: "test-model", MODEL_REQUEST_TIMEOUT_MS: 1000, PAPERCLIP_REQUEST_TIMEOUT_MS: 500, EXECUTION_TIMEOUT_MS: 5000, ...config },
     context: { prompt, issueId: "issue" }, authToken: "run-secret", onLog: async () => {} };
 }
 beforeEach(() => {
   savedTimeoutEnv = Object.fromEntries(timeoutKeys.map(key => [key, process.env[key]]));
   for (const key of timeoutKeys) delete process.env[key];
-  calls = [];
+  calls = []; journalFixture = delegationFixture({ company: "company", source: "issue" });
   respond = () => chat("Answer");
   axios.defaults.adapter = async config => {
+    const auxiliary = journalFixture.auxiliary(config); if (auxiliary) return auxiliary;
     calls.push(config);
-    const data = await respond(config);
+    const data = await respond(config); journalFixture.observe(config, data);
     return { status: 200, statusText: "OK", headers: {}, config, data };
   };
 });
@@ -211,12 +213,15 @@ for (const stop of ["cancel", "timeout"]) {
     if (!enableTimers(t)) return; axios.defaults.adapter = "http";
     const started = deferred(), controller = new AbortController(), requests = [];
     const nativeRequest = (options, callback) => {
-      const req = new Writable({ autoDestroy: false, write(_c, _e, done) { done(); }, final(done) {
+      let body = "";
+      const req = new Writable({ autoDestroy: false, write(chunk, _e, done) { body += chunk.toString(); done(); }, final(done) {
         done();
         if (options.path.endsWith("/issues")) { started.resolve(req); return; }
         queueMicrotask(() => {
-          const response = Readable.from([JSON.stringify(options.method === "GET" ? agents : plan)]);
-          response.statusCode = 200; response.headers = { "content-type": "application/json" }; response.req = req; callback(response);
+          const prepared = { url: `https://fixture.invalid${options.path}`, method: options.method.toLowerCase(), headers: options.headers, data: body || undefined };
+          const auxiliary = journalFixture.auxiliary(prepared);
+          const response = Readable.from([JSON.stringify(auxiliary ? auxiliary.data : options.method === "GET" ? agents : plan)]);
+          response.statusCode = auxiliary?.status ?? 200; response.headers = { "content-type": "application/json" }; response.req = req; callback(response);
         });
       } });
       req.setTimeout = () => req; req.setKeepAlive = () => req; requests.push({ options, req }); return req;
