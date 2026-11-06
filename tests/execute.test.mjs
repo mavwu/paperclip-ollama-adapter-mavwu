@@ -39,7 +39,7 @@ function context(prompt = "Explain addition", config = {}, wake = {}) {
     agent: { id: "ceo", companyId: "test-company", name: "CEO", adapterType: "ollama_local", adapterConfig: {} },
     runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: "test-issue" },
     config: {
-      BASE_URL: "http://model.invalid/v1", PAPERCLIP_BASE_URL: "http://paperclip.invalid",
+      BASE_URL: "https://model.invalid/v1", PAPERCLIP_BASE_URL: "https://paperclip.invalid",
       API_KEY: "fake-model-key", MODEL: "test-model", SYSTEM_PROMPT: "Test instructions",
       AUTO_MARK_DONE: false, ENABLE_PAPERCLIP_ACTIONS: true, ...config,
     },
@@ -310,7 +310,7 @@ test("agent lookup denial cannot become a successful company action", async () =
 test("actions disabled preserves chat without any Paperclip calls", async () => {
   respond = () => chat("A general workflow suggestion.");
   assert.equal((await execute(context("Suggest a workflow for our team", { ENABLE_PAPERCLIP_ACTIONS: false }))).exitCode, 0);
-  assert.ok(calls.every(c => c.url.startsWith("http://model.invalid")));
+  assert.ok(calls.every(c => c.url.startsWith("https://model.invalid")));
 });
 
 for (const prompt of [
@@ -326,7 +326,7 @@ for (const prompt of [
     assert.equal(result.exitCode, 0);
     assert.equal(result.resultJson.stopReason, "response_received");
     assert.equal(calls.length, 1);
-    assert.ok(calls[0].url.startsWith("http://model.invalid"));
+    assert.ok(calls[0].url.startsWith("https://model.invalid"));
     noIssueCreation(); noCompletionWrites();
   });
 }
@@ -335,7 +335,7 @@ test("generic agent terminology does not request company data even with a token"
   respond = () => chat("General answer");
   assert.equal((await execute(context("Explain how an AI agent works"))).exitCode, 0);
   assert.equal(calls.length, 1);
-  assert.ok(calls[0].url.startsWith("http://model.invalid"));
+  assert.ok(calls[0].url.startsWith("https://model.invalid"));
 });
 
 for (const missingToken of [false, true]) {

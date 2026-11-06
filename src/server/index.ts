@@ -18,8 +18,7 @@ function getConfigSchema(): AdapterConfigSchema {
         key: "API_KEY",
         label: "API Key",
         type: "text",
-        default: "ollama",
-        hint: "Ollama's OpenAI-compatible endpoint accepts any non-empty bearer token by default.",
+        hint: "Omit for the public Ollama placeholder; empty disables model authorization. Explicit keys are treated as secrets. Credentials must be visible ASCII without whitespace.",
       },
       {
         key: "MODEL",
@@ -66,8 +65,7 @@ function getConfigSchema(): AdapterConfigSchema {
         key: "PAPERCLIP_BASE_URL",
         label: "Paperclip Base URL",
         type: "text",
-        default: "http://127.0.0.1:3100",
-        hint: "Paperclip API URL for agent lookup and delegated task creation.",
+        hint: "Optional trusted override. Omit to use the host runtime API URL. HTTPS is required except for loopback HTTP.",
       },
     ],
   };

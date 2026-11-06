@@ -13,25 +13,57 @@ The adapter calls Ollama's OpenAI-compatible chat-completions endpoint. Configur
 | `MAX_TOKENS` | `maxTokens` | `2048` |
 | `SYSTEM_PROMPT` | `systemPrompt` | Agent identity/truthful-response instructions from `src/metadata.ts` |
 | `AUTO_MARK_DONE` | `autoMarkDone` | `false` (deprecated; no completion writes) |
-| `PAPERCLIP_BASE_URL` | `paperclipBaseUrl` | `http://127.0.0.1:3100` |
+| `PAPERCLIP_BASE_URL` | `paperclipBaseUrl` | Host runtime URL, otherwise derived host/port (`http://localhost:3100`) |
 | `ENABLE_PAPERCLIP_ACTIONS` | `enablePaperclipActions` | `true` |
 
-The current alias resolution checks each uppercase config/environment pair before its camelCase pair. Consequently, an uppercase environment value can override a camelCase agent setting. Use uppercase adapter config keys for explicit overrides until precedence is corrected in the integration phase. Nested `config.env` and the standard `PAPERCLIP_API_URL` are not consumed by this config reader; set `PAPERCLIP_BASE_URL` explicitly when the host is not on the default address.
+Configuration precedence is:
 
-Task `context.options` and `context.task.options` can override adapter config. Restrict who supplies those fields. These Phase 0 changes do not redesign configuration trust or credentials.
+1. Explicit fields on the host-supplied `context.config`.
+2. The host-resolved agent environment object, `context.config.env`.
+3. Process environment (including dotenv values, which do not override existing process values).
+4. Adapter defaults.
+
+Each layer checks uppercase aliases before camelCase aliases. A higher-layer camelCase value wins over a lower-layer uppercase value. On Windows, environment names differing only by case share a single OS entry (`MODEL`/`model`, `TEMPERATURE`/`temperature`); their last OS assignment wins before adapter normalization. Plain configuration objects can contain both spellings and use the stated uppercase-first policy.
+
+Only `TEMPERATURE`/`temperature` and `MAX_TOKENS`/`maxTokens` are permitted task overrides. `context.task.options` is applied first, then `context.options`, normalizing aliases independently at each step. Other options are ignored, including `env`, `MODEL`, `SYSTEM_PROMPT`, credentials, destinations, runtime skills and action/completion flags. Task options are not a trusted environment source. Temperature must be finite and between 0 and 2; max tokens must be a positive safe integer. Invalid selected configuration fails rather than falling through to a lower-priority value. An explicit empty API key omits model authorization, and an empty system prompt omits the system message.
+
+For the Paperclip destination, the existing adapter-specific `PAPERCLIP_BASE_URL`/`paperclipBaseUrl` override follows those same three configuration layers. If absent, host process `PAPERCLIP_API_URL` wins, followed by `PAPERCLIP_RUNTIME_API_URL`. Otherwise the adapter mirrors current upstream host/port derivation: `PAPERCLIP_LISTEN_HOST` or `HOST`, and `PAPERCLIP_LISTEN_PORT` or `PORT`, with localhost/3100 defaults. Wildcard hosts map to localhost. Reserved `config.env.PAPERCLIP_API_URL` cannot override that host runtime URL. Neither process nor agent `PAPERCLIP_API_KEY` can supply Paperclip identity: only `context.authToken` is used.
 
 Example:
 
 ```env
 BASE_URL=http://localhost:11434/v1
-API_KEY=ollama
 MODEL=qwen2.5-coder:1.5b
 TEMPERATURE=0.7
 MAX_TOKENS=2048
 AUTO_MARK_DONE=false
-PAPERCLIP_BASE_URL=http://127.0.0.1:3100
 ENABLE_PAPERCLIP_ACTIONS=true
 ```
+
+## URL and credential boundaries
+
+Both endpoints must be absolute HTTP(S) base URLs with a nonempty raw authority immediately after exactly two scheme slashes. HTTPS supports secure remote services; HTTP is restricted to exact localhost, parsed IPv4 literals in 127.0.0.0/8 and IPv6 ::1 (including expanded spelling normalized by the URL parser). Deceptive DNS names such as `127.attacker.invalid` are rejected. IPv4-mapped IPv6 addresses are not supported for HTTP. Usernames/passwords (including an empty user-info marker), excess authority slashes, query strings, fragments, backslashes and embedded whitespace/controls are rejected before URL normalization can hide malformed syntax. Base paths are supported, for example `https://gateway.example/model/v1` or `https://gateway.example/paperclip`. Absent URLs use the defaults above; explicit empty, null, wrong-type or malformed URLs fail with `INVALID_CONFIGURATION` before any outbound request, even when that service would otherwise be optional or disabled. Omit an optional override rather than setting it blank.
+
+Model completion, delegation planning and the environment probe share the model client. It receives only the configured model key. Agent lookup and issue creation share a separate Paperclip client using only the host's run token. Clients expose adapter-owned operations, not arbitrary URL/header/request-config passthrough. Ambient Axios Basic auth, headers, parameters and interceptors are not inherited. Ambient HTTP(S) proxies are disabled at both Axios and Node agent layers: private direct HTTP and HTTPS agents avoid the global agents, including Node's `--use-env-proxy` / `NODE_USE_ENV_PROXY` behavior. The Node HTTP transport uses `maxRedirects: 0`, rejects every 3xx response, and explicitly verifies HTTPS certificates; no redirect request or automatic replay follows. Use a direct service URL or a trusted HTTPS gateway rather than configuring a redirect or ambient proxy.
+
+Both bearer credentials must be nonempty visible ASCII (0x21 through 0x7e) when present. Whitespace, controls, non-ASCII and malformed Unicode are rejected before any request; credentials are never trimmed or repaired. An absent/empty run token cannot authorize Paperclip requests. An explicitly empty model key omits model authorization.
+
+Known supplied credential values are redacted from ordinary stdout/stderr and invocation metadata as well as error diagnostics. The implicit public `ollama` default is not collected as a secret, so normal Ollama answers and command metadata retain that word. Explicit credentials from configuration, agent environment or process environment are still treated as secrets, even if the value is `ollama`; omit that setting to use the public default. The schema and examples leave the placeholder implicit. Previously stored explicit placeholder values retain explicit-secret behavior. This is a diagnostic safeguard, not a substitute for keeping secrets out of user/task text. The adapter never injects the Paperclip token into a model prompt.
+
+Credential discovery uses the explicit credential classes in `src/server/diagnostics.ts`, with camelCase/uppercase normalization and vendor/scope prefixes. These include API keys, authentication/access/session tokens, secrets, passwords, private/signing keys, authorization and cookies. It does not infer a credential from a substring alone. Public sampling controls, token limits/counts/budgets and temperatures are excluded; string values such as `MAX_TOKENS=2048` or task `maxTokens="1"` do not redact those numbers from answers or metadata. Actual credentials remain secrets even when their value is numeric. Labeled provider diagnostics use the same classification policy, and metadata redaction covers both keys and values. Unrecognized custom credential names require extending the explicit policy; no heuristic can identify every arbitrary secret embedded in text.
+
+## Integration contract and compatibility
+
+The baseline dependency remains `@paperclipai/adapter-utils` **2026.609.0**, unchanged by this batch. Its `AdapterExecutionContext` provides `config` and separate `authToken`; no `runtime.env` or task-provided authentication contract is assumed. In the official source, the host resolves environment/secrets before passing `runtimeConfig` as `config`, and built-in adapters read `config.env`. The host mints the local run JWT when `supportsLocalAgentJwt` applies. Trust in `config`/`config.env` therefore depends on the host's configuration and secret-access controls; adapters cannot independently attest who authored those settings.
+
+Source references inspected before implementation:
+
+- [Configuration preparation](https://github.com/paperclipai/paperclip/blob/879140cbbde40d228104adb062bd020f4ba3a139/server/src/services/heartbeat/execution-configuration.ts#L185).
+- [Run token and adapter invocation](https://github.com/paperclipai/paperclip/blob/879140cbbde40d228104adb062bd020f4ba3a139/server/src/services/heartbeat/runtime-execution.ts#L261).
+- [Built-in environment consumption](https://github.com/paperclipai/paperclip/blob/879140cbbde40d228104adb062bd020f4ba3a139/packages/adapters/pi-local/src/server/execute.ts#L283).
+- [Current upstream runtime URL and environment protections](https://github.com/paperclipai/paperclip/blob/879140cbbde40d228104adb062bd020f4ba3a139/packages/adapter-utils/src/server-utils.ts#L3231).
+
+The installed utility helper gives `PAPERCLIP_RUNTIME_API_URL` priority over `PAPERCLIP_API_URL`; inspected current upstream gives the explicit `PAPERCLIP_API_URL` priority. This adapter deliberately follows the latter order directly and tests it. The package's root external-adapter factory and declared dependency version are preserved. Later upstream context capabilities are not treated as available merely because current source describes them.
 
 ## Issue disposition
 
@@ -48,6 +80,8 @@ This deliberately applies to apparently finished answers, blocked responses, pla
 - `workflowCompleted` is always `false`; generating text and creating a task do not prove the source task's completion.
 
 A valid blocked or planning reply can be a successful inference response without being completed work. A declined delegation is a failed requested action. An unverified creation receipt is a failure; the request may already have persisted, so check state before retrying.
+
+Issue receipts require a nonblank scalar string ID without surrounding whitespace, unsafe controls/markup or known credential values. Supplied assignment echoes must be matching strings; legacy receipts may omit that echo. Invalid IDs fail without persisting arbitrary response data; an assignment mismatch preserves a safe issue ID but does not claim successful delegation. Optional `identifier` must be nonblank text of at most 512 characters without unsafe controls/markup; malformed values are omitted as null while preserving an independently valid issue ID. Valid display identifiers and assignee names are redacted before persistence. Other provider response fields are never copied into action metadata. Credential-bearing assignee IDs are rejected before issue creation. A real credential that collides with an opaque ID can therefore make that ID unverified; use a distinct credential or inspect Paperclip state rather than retrying blindly.
 
 Optional enrichment is distinct from a requested organizational action: an unavailable optional lookup is recorded as `success: false`, `required: false` in `actions`, while a usable general answer remains `response_received`. Required lookup failures still fail the execution and do not invoke the model to guess company state.
 
@@ -90,6 +124,6 @@ The rendered inference prompt still uses the existing wake/task extraction paths
 
 ## Tests and installation
 
-`npm test` builds and runs the deterministic regression suite; all Axios requests use an in-memory transport. `npm run test:integration` separately runs an opt-in real model smoke test with company actions disabled and no company credentials or issue ID.
+`npm test` builds and runs the deterministic regression suite. Tests include mocked Axios calls, real Axios request/header serialization with intercepted Node transports, and native Node agent selection in child processes with final TCP/TLS socket constructors intercepted before network activity. A Socket.connect guard also intercepts previously captured connection functions. Each proxy-mode test uses a global-agent positive control to prove activation, then reports which mode was exercised. Unsupported `--use-env-proxy`, or an environment mode that does not activate on that Node version, is explicitly reported as skipped/unverified rather than passed. They do not perform DNS lookups, real TLS handshakes or external service calls. `npm run test:integration` separately runs an opt-in real model smoke test with company actions disabled and no company credentials or issue ID.
 
 Use the external adapter installer, which imports the package root's `createServerAdapter`. The package no longer declares `paperclipPlugin.manifest`. The retained `./manifest` export is legacy metadata, not a valid current general-plugin manifest. See [README.md](README.md) for the pinned host reference and installation details.

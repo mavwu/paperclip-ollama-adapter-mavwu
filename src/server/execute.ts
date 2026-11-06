@@ -1,4 +1,3 @@
-import axios from "axios";
 import "dotenv/config";
 import type {
   AdapterExecutionContext,
@@ -6,9 +5,12 @@ import type {
   UsageSummary,
 } from "@paperclipai/adapter-utils";
 import { label, type } from "../metadata.js";
-import { readOllamaConfig } from "./config.js";
+import { ConfigurationError, readOllamaConfig } from "./config.js";
+import type { OllamaConfig } from "./config.js";
+import { createServiceClients } from "./http.js";
+import type { ServiceClients } from "./http.js";
 import { ModelResponseError, readResponseText } from "./response.js";
-import { collectDiagnosticSecrets, describeError, errorHttpStatus, sanitizeDiagnosticText } from "./diagnostics.js";
+import { collectDiagnosticSecrets, describeError, errorHttpStatus, redactInvocation, redactKnownSecrets, sanitizeDiagnosticText } from "./diagnostics.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -246,14 +248,11 @@ function extractUsage(data: unknown): UsageSummary | undefined {
   };
 }
 
-function readOptions(context: AdapterExecutionContext): JsonObject {
+function readOptions(context: AdapterExecutionContext): JsonObject[] {
   const taskOptions = readPath(context, ["context", "task", "options"]);
   const options = readPath(context, ["context", "options"]);
 
-  return {
-    ...(isRecord(taskOptions) ? taskOptions : {}),
-    ...(isRecord(options) ? options : {}),
-  };
+  return [isRecord(taskOptions) ? taskOptions : {}, isRecord(options) ? options : {}];
 }
 
 function readIssueId(context: AdapterExecutionContext): string | null {
@@ -267,15 +266,6 @@ function readCompanyId(context: AdapterExecutionContext): string | null {
     readPath(context, ["context", "paperclipIssue", "companyId"]) ??
     readPath(context, ["context", "companyId"]);
   return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function paperclipHeaders(context: AdapterExecutionContext): Record<string, string> | null {
-  if (!context.authToken) return null;
-
-  return {
-    Authorization: `Bearer ${context.authToken}`,
-    "Content-Type": "application/json",
-  };
 }
 
 export function wantsCompanyContext(prompt: string): boolean {
@@ -338,18 +328,15 @@ function normalizeAgent(value: unknown): PaperclipAgentSummary | null {
 
 async function fetchPaperclipAgents(
   context: AdapterExecutionContext,
-  paperclipBaseUrl: string,
+  clients: ServiceClients,
   secrets: readonly string[],
 ): Promise<{ ok: true; agents: PaperclipAgentSummary[] } | { ok: false; error: string }> {
   const companyId = readCompanyId(context);
-  const headers = paperclipHeaders(context);
   if (!companyId) return { ok: false, error: "missing_company_id" };
-  if (!headers) return { ok: false, error: "missing_auth_token" };
+  if (!context.authToken) return { ok: false, error: "missing_auth_token" };
 
   try {
-    const response = await axios.get(`${paperclipBaseUrl}/api/companies/${encodeURIComponent(companyId)}/agents`, {
-      headers,
-    });
+    const response = await clients.listAgents(companyId);
     if (!Array.isArray(response.data)) return { ok: false, error: "invalid_agents_response" };
     const agents = response.data.map(normalizeAgent).filter((agent): agent is PaperclipAgentSummary => Boolean(agent));
     return { ok: true, agents };
@@ -414,9 +401,9 @@ async function planDelegation(
   config: ReturnType<typeof readOllamaConfig>,
   prompt: string,
   agents: PaperclipAgentSummary[],
+  clients: ServiceClients,
 ): Promise<DelegationDecision> {
-  const response = await axios.post(
-    `${config.baseUrl}/chat/completions`,
+  const response = await clients.complete(
     {
       model: config.model,
       messages: [
@@ -441,12 +428,6 @@ async function planDelegation(
       temperature: 0,
       max_tokens: 512,
       stream: false,
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${config.apiKey}`,
-        "Content-Type": "application/json",
-      },
     },
   );
 
@@ -497,13 +478,14 @@ async function preparePaperclipActionContext(
   config: ReturnType<typeof readOllamaConfig>,
   prompt: string,
   secrets: readonly string[],
+  clients: ServiceClients,
 ): Promise<PaperclipActionContext> {
   if (!config.enablePaperclipActions || (!wantsCompanyContext(prompt) && !wantsDelegation(prompt))) {
     return { agents: [], promptAddon: null, actions: [] };
   }
 
   const required = requiresCompanyContext(prompt) || wantsDelegation(prompt);
-  const agentsResult = await fetchPaperclipAgents(context, config.paperclipBaseUrl, secrets);
+  const agentsResult = await fetchPaperclipAgents(context, clients, secrets);
   if (!agentsResult.ok) {
     return {
       agents: [],
@@ -522,22 +504,28 @@ async function preparePaperclipActionContext(
   };
 }
 
+function validReceiptId(value: unknown, secrets: readonly string[]): value is string {
+  return typeof value === "string" && Boolean(value.trim()) && value === value.trim() &&
+    !/[<>\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/.test(value) &&
+    redactKnownSecrets(value, secrets) === value;
+}
+
 async function createDelegatedIssue(
   context: AdapterExecutionContext,
-  paperclipBaseUrl: string,
+  clients: ServiceClients,
   assignee: PaperclipAgentSummary,
   decision: DelegationDecision,
   secrets: readonly string[],
 ): Promise<JsonObject> {
   const companyId = readCompanyId(context);
-  const headers = paperclipHeaders(context);
   const parentId = readIssueId(context);
   if (!companyId) return { attempted: false, success: false, reason: "missing_company_id" };
-  if (!headers) return { attempted: false, success: false, reason: "missing_auth_token" };
+  if (!context.authToken) return { attempted: false, success: false, reason: "missing_auth_token" };
+  if (!validReceiptId(assignee.id, secrets)) return { attempted: false, success: false, reason: "invalid_assignee_id", error: "The selected agent did not supply a safe scalar ID. No task was created." };
 
   try {
-    const response = await axios.post(
-      `${paperclipBaseUrl}/api/companies/${encodeURIComponent(companyId)}/issues`,
+    const response = await clients.createIssue(
+      companyId,
       {
         title: decision.title ?? `Follow up: ${assignee.name}`,
         description: decision.description ?? decision.reason ?? "Follow-up task delegated by the current Paperclip agent.",
@@ -545,25 +533,33 @@ async function createDelegatedIssue(
         parentId,
         assigneeAgentId: assignee.id,
       },
-      { headers },
     );
 
-    if (!isRecord(response.data) || typeof response.data.id !== "string" || !response.data.id.trim()) {
-      return { attempted: true, success: false, reason: "invalid_issue_receipt", error: "Paperclip returned no issue ID; creation outcome is unverified. Do not retry blindly." };
+    // Required identity is an opaque, nonblank scalar, never arbitrary JSON.
+    // Do not normalize IDs or copy unvalidated optional provider fields.
+    if (!isRecord(response.data) || !validReceiptId(response.data.id, secrets)) {
+      return { attempted: true, success: false, reason: "invalid_issue_receipt", error: "Paperclip returned no safe scalar issue ID; creation outcome is unverified. Do not retry blindly." };
     }
-    if (response.data.assigneeAgentId !== undefined && response.data.assigneeAgentId !== assignee.id) {
+    // Legacy receipts may omit the assignment echo. Any supplied value must be
+    // a matching string; null, objects and mismatches cannot confirm assignment.
+    if (response.data.assigneeAgentId !== undefined &&
+        (typeof response.data.assigneeAgentId !== "string" || response.data.assigneeAgentId !== assignee.id)) {
       return {
         attempted: true, success: false, issueId: response.data.id, reason: "assignment_not_verified",
         error: "The returned issue is not assigned to the requested agent. Check Paperclip state before retrying.",
       };
     }
+    const rawIdentifier = response.data.identifier;
+    const identifier = typeof rawIdentifier === "string" && rawIdentifier.trim() && rawIdentifier.length <= 512 &&
+      !/[<>\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/.test(rawIdentifier)
+      ? redactKnownSecrets(rawIdentifier.trim(), secrets) : null;
     return {
       attempted: true,
       success: true,
       issueId: response.data.id,
-      identifier: response.data.identifier ?? null,
+      identifier,
       assigneeAgentId: assignee.id,
-      assigneeName: assignee.name,
+      assigneeName: redactKnownSecrets(assignee.name, secrets),
     };
   } catch (error) {
     return {
@@ -583,6 +579,7 @@ async function maybeCreateDelegatedIssue(
   prompt: string,
   agents: PaperclipAgentSummary[],
   secrets: readonly string[],
+  clients: ServiceClients,
 ): Promise<{ text: string; action: JsonObject } | null> {
   if (!config.enablePaperclipActions || !wantsDelegation(prompt)) return null;
   if (agents.length === 0) {
@@ -591,7 +588,7 @@ async function maybeCreateDelegatedIssue(
 
   let decision: DelegationDecision | null = null;
   try {
-    decision = await planDelegation(config, prompt, agents);
+    decision = await planDelegation(config, prompt, agents, clients);
   } catch (error) {
     return {
       text: "I could not create the delegated task because the delegation planner failed.",
@@ -623,7 +620,7 @@ async function maybeCreateDelegatedIssue(
     };
   }
 
-  const action = await createDelegatedIssue(context, config.paperclipBaseUrl, assignee, decision, secrets);
+  const action = await createDelegatedIssue(context, clients, assignee, decision, secrets);
   if (action.success === true) {
     const identifier = typeof action.identifier === "string" ? ` (${action.identifier})` : "";
     const title = decision.title ? `: ${decision.title}` : "";
@@ -641,7 +638,7 @@ async function maybeCreateDelegatedIssue(
 
 function executionResult(
   context: AdapterExecutionContext,
-  config: ReturnType<typeof readOllamaConfig>,
+  config: Pick<OllamaConfig, "model" | "autoMarkDone">,
   text: string,
   outcome: "response_received" | "delegated" | "failed",
   actions: JsonObject[],
@@ -686,29 +683,37 @@ function executionResult(
 }
 
 export async function execute(context: AdapterExecutionContext): Promise<AdapterExecutionResult> {
-  const config = readOllamaConfig({ ...context.config, ...readOptions(context) });
+  let config: OllamaConfig | undefined;
+  const unconfigured = { model: "unconfigured", autoMarkDone: false };
   const request = actionRequest(context);
-  const secrets = collectDiagnosticSecrets(process.env, context.config, readOptions(context), { apiKey: config.apiKey, authToken: context.authToken });
+  const secrets = collectDiagnosticSecrets(process.env, context.config, readOptions(context), { authToken: context.authToken });
   const actions: JsonObject[] = [];
+  const log: AdapterExecutionContext["onLog"] = (stream, text) => context.onLog(stream, redactKnownSecrets(text, secrets));
+  const meta: AdapterExecutionContext["onMeta"] = value => context.onMeta?.(redactInvocation(value, secrets)) ?? Promise.resolve();
   let usage: UsageSummary | undefined;
   let requestingModel = false;
   const finish = async (text: string, outcome: "response_received" | "delegated" | "failed", errorCode?: string) => {
+    text = redactKnownSecrets(text, secrets);
     if (outcome === "failed") text = sanitizeDiagnosticText(text, secrets);
-    const result = executionResult(context, config, text, outcome, actions, usage, errorCode);
-    if (actions.length > 0) await context.onLog("stdout", `[paperclip-ollama-adapter] actions ${JSON.stringify({ actions })}`);
-    await context.onLog("stdout", `[paperclip-ollama-adapter] disposition ${JSON.stringify(result.resultJson?.disposition)}`);
-    await context.onLog(outcome === "failed" ? "stderr" : "stdout", text);
+    const result = executionResult(context, config ?? unconfigured, text, outcome, actions, usage, errorCode);
+    if (actions.length > 0) await log("stdout", `[paperclip-ollama-adapter] actions ${JSON.stringify({ actions })}`);
+    await log("stdout", `[paperclip-ollama-adapter] disposition ${JSON.stringify(result.resultJson?.disposition)}`);
+    await log(outcome === "failed" ? "stderr" : "stdout", text);
     return result;
   };
 
   try {
+    config = readOllamaConfig(context.config, readOptions(context));
+    // Secrets come from supplied config/environment/token values above. The
+    // implicit public "ollama" placeholder is not a secret; explicit keys are.
+    const clients = createServiceClients(config, context.authToken);
     let prompt = extractPrompt(context);
     const required = requiresCompanyContext(request) || wantsDelegation(request);
     if (!config.enablePaperclipActions && required) {
       actions.push({ type: wantsDelegation(request) ? "delegate_issue" : "fetch_agents", attempted: false, success: false, required: true, reason: "actions_disabled" });
       return await finish("The requested organizational operation requires Paperclip actions, which are disabled. No action was performed.", "failed", "PAPERCLIP_ACTIONS_DISABLED");
     }
-    const paperclipActions = await preparePaperclipActionContext(context, config, request, secrets);
+    const paperclipActions = await preparePaperclipActionContext(context, config, request, secrets, clients);
     actions.push(...paperclipActions.actions);
     if (actions.some(action => action.success === false && action.required === true)) {
       const delegation = wantsDelegation(request);
@@ -720,10 +725,10 @@ export async function execute(context: AdapterExecutionContext): Promise<Adapter
     if (paperclipActions.promptAddon) prompt = [prompt, "---", paperclipActions.promptAddon].join("\n\n");
 
     // Only the original source request is used for action detection and planning.
-    const delegatedIssue = await maybeCreateDelegatedIssue(context, config, request, paperclipActions.agents, secrets);
+    const delegatedIssue = await maybeCreateDelegatedIssue(context, config, request, paperclipActions.agents, secrets, clients);
     if (delegatedIssue) {
       actions.push(delegatedIssue.action);
-      await context.onMeta?.({
+      await meta({
         adapterType: type,
         command: "paperclip-delegate-issue",
         env: { BASE_URL: sanitizeDiagnosticText(config.baseUrl, secrets), MODEL: config.model, PAPERCLIP_BASE_URL: sanitizeDiagnosticText(config.paperclipBaseUrl, secrets) },
@@ -734,7 +739,7 @@ export async function execute(context: AdapterExecutionContext): Promise<Adapter
         delegatedIssue.action.success === true ? undefined : "PAPERCLIP_DELEGATION_FAILED");
     }
 
-    await context.onMeta?.({
+    await meta({
       adapterType: type,
       command: "ollama-openai-chat-completions",
       env: { BASE_URL: sanitizeDiagnosticText(config.baseUrl, secrets), MODEL: config.model, TEMPERATURE: String(config.temperature), MAX_TOKENS: String(config.maxTokens) },
@@ -742,8 +747,7 @@ export async function execute(context: AdapterExecutionContext): Promise<Adapter
       context: { provider: "ollama", model: config.model },
     });
     requestingModel = true;
-    const response = await axios.post(
-      `${config.baseUrl}/chat/completions`,
+    const response = await clients.complete(
       {
         model: config.model,
         messages: [
@@ -754,18 +758,19 @@ export async function execute(context: AdapterExecutionContext): Promise<Adapter
         max_tokens: config.maxTokens,
         stream: false,
       },
-      { headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" } },
     );
     requestingModel = false;
     usage = extractUsage(response.data);
     return await finish(readResponseText(response.data), "response_received");
   } catch (error) {
     const status = errorHttpStatus(error);
-    const errorCode = ModelResponseError.codeOf(error) ??
+    let invalidConfiguration = false;
+    try { invalidConfiguration = error instanceof ConfigurationError; } catch { /* hostile error object */ }
+    const errorCode = invalidConfiguration ? "INVALID_CONFIGURATION" : ModelResponseError.codeOf(error) ??
       (requestingModel ? status ? `OLLAMA_ERROR_${status}` : "OLLAMA_CONNECTION_ERROR" : "ADAPTER_EXECUTION_FAILED");
     const text = describeError(error, secrets);
     // Logging failure must not erase the structured failure (or receipts of earlier writes).
-    try { await context.onLog("stderr", `Adapter error [${errorCode}]: ${text}`); } catch { /* result remains authoritative */ }
-    return executionResult(context, config, text, "failed", actions, usage, errorCode);
+    try { await log("stderr", `Adapter error [${errorCode}]: ${text}`); } catch { /* result remains authoritative */ }
+    return executionResult(context, config ?? unconfigured, text, "failed", actions, usage, errorCode);
   }
 }

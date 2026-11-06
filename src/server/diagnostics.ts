@@ -2,7 +2,37 @@
 // request headers, error causes, or stacks into a result or log.
 const MAX_DETAIL_LENGTH = 16_384;
 const MAX_ERROR_LENGTH = 512;
-const SENSITIVE_KEY = /api[_-]?key|token|secret|password|credential|authorization|cookie/i;
+// Only named credential classes (optionally prefixed by a vendor/scope) are
+// secrets. A substring such as "token" in maxTokens is not credential evidence.
+const CREDENTIAL_CLASSES = [
+  "api_key", "api_token", "auth_token", "access_token", "refresh_token", "id_token",
+  "bearer_token", "session_token", "client_secret", "secret_key", "private_key",
+  "signing_key", "encryption_key", "secret_access_key", "secret_header",
+  "token", "secret", "password", "passwd", "credential", "credentials",
+  "authorization", "cookie", "set_cookie",
+];
+const CREDENTIAL_NAMES = new Set(CREDENTIAL_CLASSES.flatMap(name => [name, name.replaceAll("_", "")]));
+const PUBLIC_SETTINGS = new Set([
+  "maxtokens", "mintokens", "maxtoken", "maxoutputtokens", "maxinputtokens", "maxcompletiontokens", "maxnewtokens",
+  "tokencount", "tokenlimit", "tokenbudget", "prompttokens", "completiontokens", "inputtokens", "outputtokens",
+  "temperature", "topp", "topk", "minp", "seed", "repeatpenalty", "frequencypenalty", "presencepenalty",
+]);
+
+function credentialField(key: string): boolean {
+  const name = key.replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2").replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (PUBLIC_SETTINGS.has(name.replaceAll("_", ""))) return false;
+  return CREDENTIAL_NAMES.has(name) || CREDENTIAL_CLASSES.some(suffix => name.endsWith(`_${suffix}`));
+}
+
+function redactCredentialHeaders(text: string): string {
+  return text.split(/\r?\n/).map(line => {
+    for (const match of line.matchAll(/\b([\w-]+)\s*:/g)) {
+      if (credentialField(match[1])) return `${line.slice(0, match.index)}[REDACTED HEADER]`;
+    }
+    return line;
+  }).join("\n");
+}
 
 function own(value: unknown, key: string): unknown {
   try {
@@ -23,7 +53,7 @@ export function collectDiagnosticSecrets(...sources: unknown[]): string[] {
     try {
       for (const key of Object.keys(source)) {
         const value = own(source, key);
-        if (SENSITIVE_KEY.test(key) && typeof value === "string" && value) secrets.add(value);
+        if (credentialField(key) && typeof value === "string" && value) secrets.add(value);
         else if (value && typeof value === "object") visit(value, depth + 1);
       }
     } catch { /* Proxy traps and malformed config are not diagnostic authority. */ }
@@ -32,13 +62,7 @@ export function collectDiagnosticSecrets(...sources: unknown[]): string[] {
   return [...secrets];
 }
 
-export function sanitizeDiagnosticText(value: unknown, secrets: readonly string[]): string {
-  if (typeof value !== "string" || !value.trim()) return "Diagnostic detail unavailable.";
-  if (value.length > MAX_DETAIL_LENGTH) return "Diagnostic detail omitted (oversized).";
-  if (/[<>\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/.test(value) ||
-      /(?:javascript|vbscript|data):|&(?:lt|gt);|\n\s*at\s/i.test(value)) {
-    return "Diagnostic detail omitted (unsafe content).";
-  }
+export function redactKnownSecrets(value: string, secrets: readonly string[]): string {
   let text = value;
   // Match whole known values, including common encodings, before truncating.
   const variants = new Set<string>();
@@ -49,11 +73,29 @@ export function sanitizeDiagnosticText(value: unknown, secrets: readonly string[
     try { variants.add(encodeURIComponent(secret)); } catch { /* malformed Unicode */ }
   }
   for (const secret of [...variants].sort((a, b) => b.length - a.length)) text = text.split(secret).join("[REDACTED]");
-  text = text
-    .replace(/\b(?:https?|file):\/\/[^\s<>"')]+/gi, "[REDACTED URL]")
-    .replace(/\b[\w-]*(?:authorization|cookie|api[_-]?key|token|secret|password|credential)[\w-]*\s*:\s*[^\r\n]+/gi, "[REDACTED HEADER]")
+  return text;
+}
+
+// Invocation metadata is adapter-owned plain data. Redact keys and values without
+// truncating legitimate prompts or applying the stricter error-body filter.
+export function redactInvocation<T>(value: T, secrets: readonly string[]): T {
+  if (typeof value === "string") return redactKnownSecrets(value, secrets) as T;
+  if (Array.isArray(value)) return value.map(entry => redactInvocation(entry, secrets)) as T;
+  if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).map(key => [redactKnownSecrets(key, secrets), redactInvocation(own(value, key), secrets)])) as T;
+  return value;
+}
+
+export function sanitizeDiagnosticText(value: unknown, secrets: readonly string[]): string {
+  if (typeof value !== "string" || !value.trim()) return "Diagnostic detail unavailable.";
+  if (value.length > MAX_DETAIL_LENGTH) return "Diagnostic detail omitted (oversized).";
+  if (/[<>\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/.test(value) ||
+      /(?:javascript|vbscript|data):|&(?:lt|gt);|\n\s*at\s/i.test(value)) {
+    return "Diagnostic detail omitted (unsafe content).";
+  }
+  const text = redactCredentialHeaders(redactKnownSecrets(value, secrets)
+    .replace(/\b(?:https?|file):\/\/[^\s<>"')]+/gi, "[REDACTED URL]"))
     .replace(/\b(?:Bearer|Basic)\s+[^\s"',;]+/gi, "[REDACTED]")
-    .replace(/(["']?[\w-]*(?:api[_-]?key|token|secret|password|credentials?|authorization|cookie)[\w-]*["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/gi, "$1[REDACTED]")
+    .replace(/(["']?([\w-]+)["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/g, (match, prefix: string, key: string) => credentialField(key) ? `${prefix}[REDACTED]` : match)
     .replace(/\beyJ[\w-]+\.[\w-]+\.[\w-]+\b/g, "[REDACTED]")
     .replace(/\b(?:sk-|ghp_|github_pat_|npm_)[\w-]{8,}/g, "[REDACTED]")
     .replace(/(?:[A-Za-z]:[\\/]|\/(?:home|Users|etc|var|tmp|run|private)\/)[^\s"'<>]+/g, "[REDACTED PATH]")

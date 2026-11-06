@@ -1,4 +1,3 @@
-import axios from "axios";
 import "dotenv/config";
 import type {
   AdapterEnvironmentCheck,
@@ -8,37 +7,31 @@ import type {
 import { type } from "../metadata.js";
 import { readResponseText } from "./response.js";
 import { readOllamaConfig } from "./config.js";
-import { collectDiagnosticSecrets, describeError, sanitizeDiagnosticText } from "./diagnostics.js";
+import { collectDiagnosticSecrets, describeError, redactKnownSecrets, sanitizeDiagnosticText } from "./diagnostics.js";
+import { createServiceClients } from "./http.js";
 
 export async function testEnvironment(
   context: AdapterEnvironmentTestContext,
 ): Promise<AdapterEnvironmentTestResult> {
-  const config = readOllamaConfig(context.config);
-  const secrets = collectDiagnosticSecrets(process.env, context.config, { apiKey: config.apiKey });
-  const checks: AdapterEnvironmentCheck[] = [
-    {
-      code: "ollama_config",
-      level: "info",
-      message: `Using ${config.model} at ${sanitizeDiagnosticText(config.baseUrl, secrets)}`,
-    },
-  ];
+  const secrets = collectDiagnosticSecrets(process.env, context.config);
+  const checks: AdapterEnvironmentCheck[] = [];
 
   try {
-    const response = await axios.post(
-      `${config.baseUrl}/chat/completions`,
+    const config = readOllamaConfig(context.config);
+    // Only supplied credentials are secrets; the implicit "ollama" default is public.
+    const clients = createServiceClients(config, undefined, 30_000);
+    checks.push({
+      code: "ollama_config",
+      level: "info",
+      message: `Using ${redactKnownSecrets(config.model, secrets)} at ${sanitizeDiagnosticText(config.baseUrl, secrets)}`,
+    });
+    const response = await clients.complete(
       {
         model: config.model,
         messages: [{ role: "user", content: "Reply with exactly ok." }],
         temperature: 0,
         max_tokens: 8,
         stream: false,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${config.apiKey}`,
-          "Content-Type": "application/json",
-        },
-        timeout: 30_000,
       },
     );
 

@@ -35,16 +35,18 @@ Provide values through Paperclip adapter config or the environment. Copy `.env.e
 
 ```env
 BASE_URL=http://localhost:11434/v1
-API_KEY=ollama
 MODEL=qwen2.5-coder:1.5b
 TEMPERATURE=0.7
 MAX_TOKENS=2048
 AUTO_MARK_DONE=false
-PAPERCLIP_BASE_URL=http://127.0.0.1:3100
 ENABLE_PAPERCLIP_ACTIONS=true
 ```
 
-`SYSTEM_PROMPT` is optional. Config supports uppercase and camelCase aliases, such as `MODEL`/`model`. See [CONFIGURATION.md](CONFIGURATION.md) for precedence, result semantics and limitations.
+`SYSTEM_PROMPT` is optional. Config supports uppercase and camelCase aliases, such as `MODEL`/`model`. Explicit config wins over host-resolved `config.env`, then process environment, then defaults. Task options can override only temperature and token limits. See [CONFIGURATION.md](CONFIGURATION.md) for the exact contract, alias policy, result semantics and limitations.
+
+Omit `API_KEY` to use Ollama's public `ollama` placeholder without redacting normal occurrences of that word. Every explicitly supplied key is treated as a secret, including an explicit `API_KEY=ollama`. Credentials must contain only visible ASCII without whitespace; invalid values fail before any request rather than being trimmed or rewritten. An explicit empty key disables model authorization.
+
+Omit `PAPERCLIP_BASE_URL` to use the host runtime URL; set it explicitly only for a trusted destination override. Both service URLs are validated before inference or company lookup. HTTP is allowed only for loopback (`localhost`, `127.0.0.0/8`, `[::1]`); remote services require HTTPS. Embedded credentials, query strings, fragments and malformed values fail configuration with zero outbound requests. All redirects, including same-origin redirects, are rejected. The clients do not inherit Axios credentials, headers, interceptors or proxies; proxy environment variables are intentionally not used. Configure a direct HTTPS endpoint or trusted gateway where needed.
 
 The model list is a convenience list, not a capability certification. Any configured model must support the selected endpoint; delegation additionally needs reliable JSON planning. No native model tools are offered.
 
@@ -77,7 +79,7 @@ npm test
 npm run build
 ```
 
-`npm test` builds and runs deterministic regression tests with Node's test runner. Axios transport is replaced in memory; tests do not contact Ollama or Paperclip and cannot modify company data.
+`npm test` builds and runs deterministic regression tests with Node's test runner. Alongside mocked Axios tests, network-boundary tests exercise real Axios serialization with intercepted Node transports. Child processes exercise native HTTP/HTTPS agent selection under Node environment proxy settings (including `--use-env-proxy` where supported), intercepting socket creation before DNS or TLS connection. Tests do not contact Ollama or Paperclip and cannot modify company data.
 
 The former live inference smoke test is separately opt-in:
 
@@ -109,7 +111,8 @@ There is no request deadline/cancellation support, replay-safe task creation, fu
 - For a delegation failure, inspect returned action details and Paperclip permissions.
 - For truncated responses, raise the output limit or reduce the request; no completion write occurred.
 - Tool calls are rejected because this adapter has no tool executor.
-- Provider errors retain safe message details and HTTP status. Diagnostic messages are capped at 512 characters; known secrets, sensitive headers/fields and URLs are redacted, and unsafe/oversized content is omitted. Raw response objects and stacks are never used as error messages.
+- Provider errors retain safe message details and HTTP status. Diagnostic messages are capped at 512 characters; known secrets, sensitive headers/fields and URLs are redacted, and unsafe/oversized content is omitted. Credential classification explicitly separates authentication fields from public sampling settings, so token limits such as `2048` or `1` retain normal output and metadata. Known credential values are also redacted from ordinary logs and invocation metadata, including object keys. Raw response objects and stacks are never used as error messages.
+- Malformed optional issue identifiers are omitted while retaining a valid receipt ID. Required IDs and supplied assignment echoes are validated before reporting delegation; arbitrary provider objects never enter action metadata. See the configuration reference for receipt validation and credential/ID collision handling.
 
 ## License
 

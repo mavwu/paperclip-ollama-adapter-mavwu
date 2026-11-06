@@ -31,19 +31,21 @@ Use for text inference and explicit follow-up task creation. This adapter does n
 
 ## Environment variables
 
-- BASE_URL: Ollama OpenAI-compatible base URL. Defaults to http://localhost:11434/v1
-- API_KEY: Authorization bearer token. Defaults to ollama
+- BASE_URL: Model service base URL. Defaults to http://localhost:11434/v1; remote endpoints require HTTPS. URLs cannot include credentials, query strings, or fragments.
+- API_KEY: Model-service bearer token only. Omit for the public ollama placeholder; an explicit empty string omits model authorization. Explicit values are treated as secrets, including ollama. Credentials must be visible ASCII without whitespace and are never trimmed or repaired. Never used as Paperclip identity.
 - MODEL: Any Ollama model name. Defaults to qwen2.5-coder:1.5b
 - TEMPERATURE: Sampling temperature. Defaults to 0.7
 - MAX_TOKENS: Maximum output tokens. Defaults to 2048
 - SYSTEM_PROMPT: Optional system prompt prepended to each request.
 - AUTO_MARK_DONE: Deprecated compatibility setting; defaults to false. Issues are never automatically marked done, even when true, because completion is unverified.
-- PAPERCLIP_BASE_URL: Paperclip server URL for agent lookup and follow-up task creation. Defaults to http://127.0.0.1:3100
+- PAPERCLIP_BASE_URL: Optional trusted Paperclip API override for agent lookup and follow-up task creation. Otherwise uses host PAPERCLIP_API_URL, then PAPERCLIP_RUNTIME_API_URL, then host/listen-port derivation (localhost:3100 by default).
 - ENABLE_PAPERCLIP_ACTIONS: When true, the adapter can inspect visible agents and create assigned follow-up tasks when asked. Defaults to true.
 
 ## Paperclip adapter config
 
 The same values can be provided through adapter config using either uppercase keys or camelCase keys:
+
+Precedence is explicit adapter config, then its host-resolved env object, then process environment, then defaults. Uppercase aliases win conflicts within each layer. Reserved env.PAPERCLIP_API_URL and env.PAPERCLIP_API_KEY cannot replace host runtime URL or context.authToken. Only TEMPERATURE/temperature and MAX_TOKENS/maxTokens may be overridden by task options. Both service clients reject all redirects and ignore ambient Axios authentication/proxy defaults.
 
 - BASE_URL or baseUrl
 - API_KEY or apiKey
