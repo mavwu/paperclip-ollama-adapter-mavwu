@@ -115,7 +115,7 @@ export function readOllamaConfig(config: Record<string, unknown> = {}): OllamaCo
       ["PAPERCLIP_BASE_URL", "paperclipBaseUrl"],
       "http://127.0.0.1:3100",
     ).replace(/\/+$/, ""),
-    autoMarkDone: readBoolean(config, ["AUTO_MARK_DONE", "autoMarkDone"], true),
+    autoMarkDone: readBoolean(config, ["AUTO_MARK_DONE", "autoMarkDone"], false),
     enablePaperclipActions: readBoolean(
       config,
       ["ENABLE_PAPERCLIP_ACTIONS", "enablePaperclipActions"],

@@ -27,6 +27,8 @@ export const agentConfigurationDoc = `# Ollama Local
 
 Use this adapter to run Paperclip agents through Ollama's OpenAI-compatible chat completions endpoint.
 
+Use for text inference and explicit follow-up task creation. This adapter does not execute tools, hire agents, load skills, or verify task completion. Use a capable agent runtime for autonomous execution.
+
 ## Environment variables
 
 - BASE_URL: Ollama OpenAI-compatible base URL. Defaults to http://localhost:11434/v1
@@ -35,8 +37,8 @@ Use this adapter to run Paperclip agents through Ollama's OpenAI-compatible chat
 - TEMPERATURE: Sampling temperature. Defaults to 0.7
 - MAX_TOKENS: Maximum output tokens. Defaults to 2048
 - SYSTEM_PROMPT: Optional system prompt prepended to each request.
-- AUTO_MARK_DONE: When true, successful runs call Paperclip and mark the touched issue done. Defaults to true.
-- PAPERCLIP_BASE_URL: Paperclip server URL for AUTO_MARK_DONE. Defaults to http://127.0.0.1:3100
+- AUTO_MARK_DONE: Deprecated compatibility setting; defaults to false. Issues are never automatically marked done, even when true, because completion is unverified.
+- PAPERCLIP_BASE_URL: Paperclip server URL for agent lookup and follow-up task creation. Defaults to http://127.0.0.1:3100
 - ENABLE_PAPERCLIP_ACTIONS: When true, the adapter can inspect visible agents and create assigned follow-up tasks when asked. Defaults to true.
 
 ## Paperclip adapter config

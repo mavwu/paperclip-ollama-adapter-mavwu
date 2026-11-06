@@ -1,5 +1,7 @@
 import { agentConfigurationDoc, label, models, type } from "./metadata.js";
 
+// Legacy metadata export retained for existing importers. This is not a current
+// Paperclip general-plugin manifest; external adapters load the root factory.
 export const manifest = {
   name: "paperclip-ollama-adapter-mavwu",
   label,

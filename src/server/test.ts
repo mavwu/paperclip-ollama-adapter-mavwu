@@ -1,25 +1,25 @@
 import axios from "axios";
 import "dotenv/config";
-import { fileURLToPath } from "node:url";
 import type {
   AdapterEnvironmentCheck,
   AdapterEnvironmentTestContext,
   AdapterEnvironmentTestResult,
-  AdapterExecutionContext,
 } from "@paperclipai/adapter-utils";
 import { type } from "../metadata.js";
-import { execute, extractPrompt, wantsCompanyContext, wantsDelegation } from "./execute.js";
+import { readResponseText } from "./response.js";
 import { readOllamaConfig } from "./config.js";
+import { collectDiagnosticSecrets, describeError, sanitizeDiagnosticText } from "./diagnostics.js";
 
 export async function testEnvironment(
   context: AdapterEnvironmentTestContext,
 ): Promise<AdapterEnvironmentTestResult> {
   const config = readOllamaConfig(context.config);
+  const secrets = collectDiagnosticSecrets(process.env, context.config, { apiKey: config.apiKey });
   const checks: AdapterEnvironmentCheck[] = [
     {
       code: "ollama_config",
       level: "info",
-      message: `Using ${config.model} at ${config.baseUrl}`,
+      message: `Using ${config.model} at ${sanitizeDiagnosticText(config.baseUrl, secrets)}`,
     },
   ];
 
@@ -42,6 +42,8 @@ export async function testEnvironment(
       },
     );
 
+    readResponseText(response.data);
+
     checks.push({
       code: "ollama_probe",
       level: "info",
@@ -56,13 +58,13 @@ export async function testEnvironment(
       testedAt: new Date().toISOString(),
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeError(error, secrets);
     checks.push({
       code: "ollama_probe_failed",
       level: "error",
       message: "Ollama chat completions probe failed.",
       detail: message,
-      hint: "Start Ollama, verify BASE_URL, and make sure the configured MODEL is available.",
+      hint: "Verify BASE_URL and MODEL, and check the error detail for empty, truncated, refused, or unsupported tool output.",
     });
 
     return {
@@ -72,80 +74,4 @@ export async function testEnvironment(
       testedAt: new Date().toISOString(),
     };
   }
-}
-
-async function runLocalTest(): Promise<void> {
-  const prompt = extractPrompt({
-    runId: "local-test",
-    agent: {
-      id: "local-agent",
-      companyId: "local-company",
-      name: "Local Test Agent",
-      adapterType: type,
-      adapterConfig: {},
-    },
-    runtime: {
-      sessionId: null,
-      sessionParams: null,
-      sessionDisplayId: null,
-      taskKey: "local-test",
-    },
-    config: {},
-    context: {
-      paperclipTaskMarkdown: "Old task: What is 1 + 1?",
-      paperclipWakeComment: { body: "Research natural numbers." },
-    },
-    onLog: async () => {},
-  } satisfies AdapterExecutionContext);
-
-  if (!prompt.includes("Research natural numbers.") || !prompt.includes("Old task: What is 1 + 1?")) {
-    throw new Error("Prompt extraction should prioritize wake comments while preserving task context.");
-  }
-
-  if (!wantsCompanyContext("check our org chart and tell me who can help")) {
-    throw new Error("Company context detection should catch org chart requests.");
-  }
-
-  if (!wantsDelegation("tell CTO to review this task")) {
-    throw new Error("Delegation detection should catch explicit handoff requests.");
-  }
-
-  const result = await execute({
-    runId: "local-test",
-    agent: {
-      id: "local-agent",
-      companyId: "local-company",
-      name: "Local Test Agent",
-      adapterType: type,
-      adapterConfig: {},
-    },
-    runtime: {
-      sessionId: null,
-      sessionParams: null,
-      sessionDisplayId: null,
-      taskKey: "local-test",
-    },
-    config: {},
-    context: {
-      prompt:
-        "Create a simple JavaScript function called addNumbers that takes two numbers and returns their sum. Return only the code.",
-    },
-    onLog: async (stream, chunk) => {
-      const writer = stream === "stderr" ? console.error : console.log;
-      writer(chunk);
-    },
-  } satisfies AdapterExecutionContext);
-
-  console.log(JSON.stringify(result, null, 2));
-
-  if (result.exitCode !== 0) {
-    throw new Error(result.errorMessage ?? "Local Ollama adapter test failed.");
-  }
-}
-
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  runLocalTest().catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });
 }

@@ -10,9 +10,6 @@
     "./manifest": "./dist/manifest.js",
     "./server": "./dist/server/index.js"
   },
-  "paperclipPlugin": {
-    "manifest": "./dist/manifest.js"
-  },
   "files": [
     "dist",
     "README.md",
@@ -20,7 +17,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "npm run build && node dist/server/test.js",
+    "test": "npm run build && node --test tests/execute.test.mjs",
+    "test:integration": "npm run build && node scripts/live-smoke.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

@@ -1,79 +1,37 @@
 # Paperclip Ollama Adapter
 
-Paperclip external adapter package for running Paperclip agents through Ollama's OpenAI-compatible API.
+External Paperclip adapter for text inference through Ollama's OpenAI-compatible API, with limited follow-up task creation.
 
-Package name:
+Package: `paperclip-ollama-adapter-mavwu` · Adapter type: `ollama_local`
 
-```bash
-paperclip-ollama-adapter-mavwu
-```
+## Supported behavior
 
-## Architecture
+- Sends a non-streaming request to `${BASE_URL}/chat/completions`.
+- Returns usable final text and basic token usage to Paperclip.
+- Can inspect visible company agents and create one assigned `todo` follow-up for an explicit delegation request, using the run's Paperclip identity.
+- Rejects ambiguous or ineligible assignees and records failed actions as failed execution results.
 
-```text
-Paperclip agent/task
--> Paperclip external adapter
--> Ollama OpenAI-compatible endpoint
--> Ollama model
--> response returned to Paperclip
-```
+This is a one-shot adapter. It does not execute model tools, edit files, run commands, hire agents, load runtime skills, or maintain conversation history. The skill files in `Paperclip-skills/` are reference material; they are not delivered at runtime. A generated answer or created follow-up does not prove that the source task was completed.
 
-The adapter posts chat completions to:
+## Completion and action outcomes
 
-```text
-http://localhost:11434/v1/chat/completions
-```
+The adapter never automatically marks an issue `done`. `AUTO_MARK_DONE` now defaults to `false` and remains accepted as a deprecated compatibility setting. Even an existing `true` value cannot close an issue: the adapter has no verified-completion mechanism.
 
-## Paperclip Contract
+Results distinguish:
 
-The package root exports the metadata and server factory Paperclip expects:
+| `resultJson.stopReason` | Meaning |
+| --- | --- |
+| `response_received` | Usable model text was returned; no task-completion claim. |
+| `delegated` | Paperclip returned an issue ID for the follow-up; its execution is separate. |
+| `failed` | Inference or a required organizational operation could not be confirmed. |
 
-- `type`
-- `label`
-- `models`
-- `agentConfigurationDoc`
-- `createServerAdapter`
+`resultJson.success` and `exitCode` describe adapter execution. `workflowCompleted` remains `false`. Failed required actions return `success: false`, a nonzero exit code, an error code and action details. Optional enrichment can fail while valid inference succeeds; that lookup is still recorded with `success: false` and `required: false`. Empty, truncated, refused, reasoning-only and unsupported tool-call responses fail instead of being treated as finished work.
 
-`createServerAdapter()` returns:
-
-- `type`
-- `execute`
-- `testEnvironment`
-- `models`
-- `agentConfigurationDoc`
-
-For Paperclip's npm/upload install path, the package also declares:
-
-```json
-{
-  "paperclipPlugin": {
-    "manifest": "./dist/manifest.js"
-  }
-}
-```
-
-The manifest module ships in the published tarball and points Paperclip at the adapter's `createServerAdapter` export.
-
-Adapter type: `ollama_local`
-
-Adapter label: `Ollama Local`
-
-## Models
-
-Built-in model choices:
-
-- `qwen2.5-coder:1.5b`
-- `nemotron-3-super:cloud`
-- `qwen2.5-coder:7b`
-- `llama3.1:8b`
-- `codellama:7b`
-- `mistral:7b`
-
-You can still use any Ollama model by setting `MODEL`.
+Paperclip or a capable agent workflow must own final disposition, review and continuation. Hosts that require a disposition may schedule recovery when an issue remains open; automatic closure is not used to suppress that recovery.
 
 ## Configuration
 
-Create a `.env` file or provide values through Paperclip adapter config:
+Provide values through Paperclip adapter config or the environment. Copy `.env.example` for local development:
 
 ```env
 BASE_URL=http://localhost:11434/v1
@@ -81,101 +39,77 @@ API_KEY=ollama
 MODEL=qwen2.5-coder:1.5b
 TEMPERATURE=0.7
 MAX_TOKENS=2048
-SYSTEM_PROMPT=You are operating as the Paperclip agent named in the run context. Stay in that agent role for company, task, and chat interactions, including when the user asks about your role. Treat the latest user request or wake comment as the current instruction. Use older task, issue, and conversation context only as background unless the latest request explicitly asks you to revisit it. Be direct, practical, and truthful. Do not claim that you used tools, edited files, ran commands, contacted services, or changed Paperclip state unless the run context or adapter result actually did that. If the task is simple and complete, give the final answer clearly. If the task cannot be completed from the available context, say what is missing or what is blocked instead of inventing results. Do not claim to be the underlying model, runtime, adapter, Ollama, or Paperclip internals unless the user specifically asks about implementation details. Respond with the final useful answer only.
-AUTO_MARK_DONE=true
+AUTO_MARK_DONE=false
 PAPERCLIP_BASE_URL=http://127.0.0.1:3100
 ENABLE_PAPERCLIP_ACTIONS=true
 ```
 
-Paperclip config can use either uppercase keys or camelCase keys, for example `BASE_URL` or `baseUrl`, `MAX_TOKENS` or `maxTokens`.
+`SYSTEM_PROMPT` is optional. Config supports uppercase and camelCase aliases, such as `MODEL`/`model`. See [CONFIGURATION.md](CONFIGURATION.md) for precedence, result semantics and limitations.
 
-Successful adapter runs mark the touched Paperclip issue `done` by default. Set `AUTO_MARK_DONE=false` for multi-step work where the issue should remain open, blocked, in review, or continue through another run.
+The model list is a convenience list, not a capability certification. Any configured model must support the selected endpoint; delegation additionally needs reliable JSON planning. No native model tools are offered.
 
-When `ENABLE_PAPERCLIP_ACTIONS=true`, the adapter can use Paperclip's local API to inspect visible company agents and create assigned follow-up tasks for explicit delegation requests, as well as create new agents for hiring requests (e.g., 'hire a CTO'). This lets prompts like 'tell CTO to review this' become an actual Paperclip task, and prompts like 'hire a CTO' create a new agent in your company.
+`ENABLE_PAPERCLIP_ACTIONS=true` permits company lookup and follow-up creation. For example, “tell CTO to review this” can create a task if CTO resolves to one eligible visible agent and Paperclip authorizes the assignment. It does not transfer the original issue. “Hire a CTO” does not create an agent: hiring and approval handling are unimplemented.
 
-## Local Development
+Generic prompts such as “Explain how a JavaScript agent works” do not request company data and work without a Paperclip token. Advice such as “Suggest a workflow for our team” may use optional enrichment; a missing token or failed lookup cannot block its general answer. Explicit reads such as “Who are our agents?” and delegation require authenticated company context and fail if it is unavailable or actions are disabled. Detection remains a limited phrase-based heuristic, not a general natural-language authorization system.
 
-Install dependencies:
+## Installation and external adapter contract
+
+Use Paperclip's **external adapter** installer with the package name, or a built local checkout. Its loader imports the package root and calls `createServerAdapter()`.
+
+Root exports remain:
+
+- `type`, `label`, `models`, `agentConfigurationDoc`
+- `createServerAdapter`
+
+The factory returns `execute`, `testEnvironment`, `getConfigSchema`, metadata and `supportsLocalAgentJwt: true`.
+
+The investigation's reference host revision, [879140c](https://github.com/paperclipai/paperclip/blob/879140cbbde40d228104adb062bd020f4ba3a139/server/src/routes/adapters.ts#L332), uses `POST /api/adapters/install` with `packageName` and optional `isLocalPath`. For a local checkout, build first and use an absolute path. Adapter management requires the host's configured administrative access and external-code policy. Check your installed host revision before using its API.
+
+This package is not a general Paperclip plugin. It no longer advertises `paperclipPlugin.manifest`; the old `./manifest` metadata export is retained only for existing importers. Installing through the general plugin/upload workflow is not supported by that legacy manifest. Both npm and local external-adapter loading use the root factory.
+
+Older Windows hosts may fail with `Received protocol 'c:'` when importing a local path. The reference upstream adapter loader uses `pathToFileURL()`; upgrade affected older hosts. This is not a reason to use the general plugin installer.
+
+## Development and verification
 
 ```bash
-npm install
-```
-
-Build:
-
-```bash
+npm ci --ignore-scripts
+npm test
 npm run build
 ```
 
-Run the local Ollama integration test:
+`npm test` builds and runs deterministic regression tests with Node's test runner. Axios transport is replaced in memory; tests do not contact Ollama or Paperclip and cannot modify company data.
+
+The former live inference smoke test is separately opt-in:
 
 ```bash
-npm test
+npm run test:integration
 ```
 
-The test sends a prompt through `execute()` and expects Ollama to be running with the configured model available.
+It requires a running Ollama endpoint and the configured model. It supplies no Paperclip token or issue ID and explicitly disables company actions. It validates inference, not persisted delegation or autonomous execution.
 
-Verify package exports:
+Inspect distribution without publishing:
 
 ```bash
+npm pack --dry-run --ignore-scripts
 node -e "import('./dist/index.js').then(m => console.log(Object.keys(m)))"
 ```
 
-Expected keys include:
+No new runtime dependencies are needed for the regression suite.
 
-```text
-type
-label
-models
-agentConfigurationDoc
-createServerAdapter
-```
+## Remaining limitations
 
-Verify the server adapter object:
+Regex intent detection and JSON delegation planning remain limited; they are not an authorization model. Only exact normalized names/titles/roles are matched. A unique exact name takes precedence; otherwise multiple role/title matches are rejected. Eligible states are `idle`, `active` and `running`; self-assignment, missing/unknown states and other statuses are rejected. Paperclip remains responsible for final permissions and scheduling.
 
-```bash
-node -e "import('./dist/index.js').then(m => console.log(m.createServerAdapter()))"
-```
-
-Expected object includes:
-
-```text
-type
-execute
-testEnvironment
-models
-agentConfigurationDoc
-```
-
-Verify the plugin manifest export:
-
-```bash
-node -e "import('./dist/manifest.js').then(m => console.log(m.default ?? m.manifest))"
-```
-
-## Publish
-
-After validating locally:
-
-```bash
-npm version patch
-npm publish
-```
-
-Install this adapter in Paperclip using:
-
-```text
-paperclip-ollama-adapter-mavwu
-```
-
-On Windows, if local-path installation fails with `Received protocol 'c:'`, use the npm package route or upgrade Paperclip to a build that converts Windows paths with `pathToFileURL()` before ESM import.
+There is no request deadline/cancellation support, replay-safe task creation, full skill/session integration or autonomous execution loop yet. A creation request can persist before a transport failure. The adapter does not retry it, but host recovery policies or operator retries can start another execution. Do not blindly repeat an uncertain action without checking Paperclip state.
 
 ## Troubleshooting
 
-- Start Ollama with `ollama serve`.
-- Confirm `BASE_URL` points to the OpenAI-compatible `/v1` endpoint.
-- Confirm the configured model is available with `ollama list`.
-- Pull a missing model with `ollama pull <model-name>`.
+- Verify Ollama is running and `BASE_URL` includes its OpenAI-compatible `/v1` path.
+- Verify the configured model is available, for example with `ollama list`.
+- For a delegation failure, inspect returned action details and Paperclip permissions.
+- For truncated responses, raise the output limit or reduce the request; no completion write occurred.
+- Tool calls are rejected because this adapter has no tool executor.
+- Provider errors retain safe message details and HTTP status. Diagnostic messages are capped at 512 characters; known secrets, sensitive headers/fields and URLs are redacted, and unsafe/oversized content is omitted. Raw response objects and stacks are never used as error messages.
 
 ## License
 

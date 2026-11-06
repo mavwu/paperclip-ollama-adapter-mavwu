@@ -50,10 +50,10 @@ function getConfigSchema(): AdapterConfigSchema {
       },
       {
         key: "AUTO_MARK_DONE",
-        label: "Auto Mark Done",
+        label: "Auto Mark Done (deprecated)",
         type: "toggle",
-        default: true,
-        hint: "When enabled, successful one-shot runs mark the touched Paperclip issue done.",
+        default: false,
+        hint: "Accepted for compatibility only. One-shot responses cannot verify task completion; issues remain open even when enabled.",
       },
       {
         key: "ENABLE_PAPERCLIP_ACTIONS",
@@ -67,7 +67,7 @@ function getConfigSchema(): AdapterConfigSchema {
         label: "Paperclip Base URL",
         type: "text",
         default: "http://127.0.0.1:3100",
-        hint: "Used only when Auto Mark Done is enabled.",
+        hint: "Paperclip API URL for agent lookup and delegated task creation.",
       },
     ],
   };
